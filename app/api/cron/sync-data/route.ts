@@ -111,7 +111,8 @@ export async function GET(request: NextRequest) {
       const maxPageIndex = pageViews.length > 0
         ? Math.max(...pageViews.map(pv => pv.page_index))
         : 0;
-      const isCompleted = maxPageIndex >= 10; // Assume 10+ steps means completed
+      // Step 38 = macro_checkout (first checkout), step 41 = confirmation
+      const isCompleted = maxPageIndex >= 38;
 
       // Upsert entry
       await prisma.funnelEntry.upsert({
