@@ -2,9 +2,9 @@
 const nextConfig = {
   output: 'standalone',
   reactStrictMode: true,
-  // Skip generating default 404/500 pages during build
-  generateBuildId: async () => {
-    return 'build-' + Date.now()
+  // Disable static optimization for all pages
+  experimental: {
+    isrMemoryCacheSize: 0,
   },
 }
 
