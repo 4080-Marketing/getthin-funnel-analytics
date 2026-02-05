@@ -117,18 +117,6 @@ export async function GET(request: NextRequest) {
       });
     }
 
-    const today = startOfDay(new Date());
-
-    // Process entries and store in database
-    let entriesProcessed = 0;
-    const stepDataMap = new Map<number, {
-      pageKey: string;
-      pageName: string;
-      views: number;
-      exits: number;
-      continues: number;
-    }>();
-
     // Helper function to check if entry completed a purchase
     const hasCompletedPurchase = (pageViews: EmbeddablesEntry['page_views']) => {
       if (!pageViews || pageViews.length === 0) return false;
@@ -141,13 +129,54 @@ export async function GET(request: NextRequest) {
       );
     };
 
+    // Process entries and store in database
+    let entriesProcessed = 0;
+
+    // Track step data globally (for step definitions) and by date (for analytics)
+    const globalStepMap = new Map<number, { pageKey: string; pageName: string }>();
+
+    // Group analytics by date
+    const dailyStepData = new Map<string, Map<number, {
+      pageKey: string;
+      pageName: string;
+      views: number;
+      exits: number;
+      continues: number;
+    }>>();
+
+    const dailyFunnelData = new Map<string, {
+      starts: number;
+      completions: number;
+    }>();
+
     for (const entry of entries) {
+      // Use entry's created_at date for analytics
+      const entryDate = startOfDay(new Date(entry.created_at));
+      const dateKey = entryDate.toISOString();
+
+      // Initialize daily maps if needed
+      if (!dailyStepData.has(dateKey)) {
+        dailyStepData.set(dateKey, new Map());
+      }
+      if (!dailyFunnelData.has(dateKey)) {
+        dailyFunnelData.set(dateKey, { starts: 0, completions: 0 });
+      }
+
+      const dailySteps = dailyStepData.get(dateKey)!;
+      const dailyFunnel = dailyFunnelData.get(dateKey)!;
+
       // Determine if entry completed a purchase
       const pageViews = entry.page_views || [];
       const maxPageIndex = pageViews.length > 0
         ? Math.max(...pageViews.map(pv => pv.page_index))
         : 0;
       const isCompleted = hasCompletedPurchase(pageViews);
+
+      // Update daily funnel counts
+      dailyFunnel.starts++;
+      if (isCompleted) {
+        dailyFunnel.completions++;
+      }
 
       // Upsert entry
       await prisma.funnelEntry.upsert({
@@ -176,9 +205,17 @@ export async function GET(request: NextRequest) {
         const isLastStep = i === pageViews.length - 1;
         const isExit = isLastStep && !isCompleted;
 
-        const existing = stepDataMap.get(pv.page_index) || {
+        const pageName = pv.page_key.replace(/_/g, ' ').replace(/\b\w/g, c => c.toUpperCase());
+
+        // Track globally for step definitions
+        if (!globalStepMap.has(pv.page_index)) {
+          globalStepMap.set(pv.page_index, { pageKey: pv.page_key, pageName });
+        }
+
+        // Track daily for analytics
+        const existing = dailySteps.get(pv.page_index) || {
           pageKey: pv.page_key,
-          pageName: pv.page_key.replace(/_/g, ' ').replace(/\b\w/g, c => c.toUpperCase()),
+          pageName,
           views: 0,
           exits: 0,
           continues: 0,
@@ -191,23 +228,22 @@ export async function GET(request: NextRequest) {
           existing.continues++;
         }
 
-        stepDataMap.set(pv.page_index, existing);
+        dailySteps.set(pv.page_index, existing);
       }
 
       entriesProcessed++;
     }
 
     // Update funnel total steps
-    const maxStepFound = Math.max(...Array.from(stepDataMap.keys()), 0);
+    const maxStepFound = Math.max(...Array.from(globalStepMap.keys()), 0);
     await prisma.funnel.update({
       where: { id: funnel.id },
       data: { totalSteps: maxStepFound + 1 },
     });
 
-    // Create/update steps and step analytics
-    let stepsProcessed = 0;
-    for (const [stepIndex, data] of stepDataMap) {
-      // Upsert step
+    // Create/update step definitions (global, not per day)
+    const stepIdMap = new Map<number, string>();
+    for (const [stepIndex, data] of globalStepMap) {
       const step = await prisma.funnelStep.upsert({
         where: {
           funnelId_stepNumber: {
@@ -226,82 +262,100 @@ export async function GET(request: NextRequest) {
           stepKey: data.pageKey,
         },
       });
-
-      // Upsert step analytics for today
-      const dropOffRate = data.views > 0 ? (data.exits / data.views) * 100 : 0;
-      const conversionRate = data.views > 0 ? (data.continues / data.views) * 100 : 0;
-
-      const existingAnalytics = await prisma.stepAnalytics.findFirst({
-        where: {
-          stepId: step.id,
-          date: today,
-          hour: null,
-        },
-      });
-
-      if (existingAnalytics) {
-        await prisma.stepAnalytics.update({
-          where: { id: existingAnalytics.id },
-          data: {
-            entries: data.views,
-            exits: data.exits,
-            conversions: data.continues,
-            dropOffRate,
-            conversionRate,
-          },
-        });
-      } else {
-        await prisma.stepAnalytics.create({
-          data: {
-            stepId: step.id,
-            date: today,
-            entries: data.views,
-            exits: data.exits,
-            conversions: data.continues,
-            dropOffRate,
-            conversionRate,
-            avgTimeOnStep: 0,
-          },
-        });
-      }
-
-      stepsProcessed++;
+      stepIdMap.set(stepIndex, step.id);
     }
 
-    // Calculate and store funnel analytics
+    // Create/update step analytics PER DAY
+    let stepsProcessed = 0;
+    for (const [dateKey, dailySteps] of dailyStepData) {
+      const analyticsDate = new Date(dateKey);
+
+      for (const [stepIndex, data] of dailySteps) {
+        const stepId = stepIdMap.get(stepIndex);
+        if (!stepId) continue;
+
+        const dropOffRate = data.views > 0 ? (data.exits / data.views) * 100 : 0;
+        const conversionRate = data.views > 0 ? (data.continues / data.views) * 100 : 0;
+
+        const existingAnalytics = await prisma.stepAnalytics.findFirst({
+          where: {
+            stepId,
+            date: analyticsDate,
+            hour: null,
+          },
+        });
+
+        if (existingAnalytics) {
+          await prisma.stepAnalytics.update({
+            where: { id: existingAnalytics.id },
+            data: {
+              entries: data.views,
+              exits: data.exits,
+              conversions: data.continues,
+              dropOffRate,
+              conversionRate,
+            },
+          });
+        } else {
+          await prisma.stepAnalytics.create({
+            data: {
+              stepId,
+              date: analyticsDate,
+              entries: data.views,
+              exits: data.exits,
+              conversions: data.continues,
+              dropOffRate,
+              conversionRate,
+              avgTimeOnStep: 0,
+            },
+          });
+        }
+
+        stepsProcessed++;
+      }
+    }
+
+    // Calculate and store funnel analytics PER DAY
     const totalStarts = entries.length;
     const totalCompletions = entries.filter(e => hasCompletedPurchase(e.page_views)).length;
     const funnelConversionRate = totalStarts > 0 ? (totalCompletions / totalStarts) * 100 : 0;
 
-    const existingFunnelAnalytics = await prisma.funnelAnalytics.findFirst({
-      where: {
-        funnelId: funnel.id,
-        date: today,
-        hour: null,
-      },
-    });
+    for (const [dateKey, dailyFunnel] of dailyFunnelData) {
+      const analyticsDate = new Date(dateKey);
+      const dailyConversionRate = dailyFunnel.starts > 0
+        ? (dailyFunnel.completions / dailyFunnel.starts) * 100
+        : 0;
 
-    if (existingFunnelAnalytics) {
-      await prisma.funnelAnalytics.update({
-        where: { id: existingFunnelAnalytics.id },
-        data: {
-          totalStarts,
-          totalCompletions,
-          totalDropoffs: totalStarts - totalCompletions,
-          conversionRate: funnelConversionRate,
-        },
-      });
-    } else {
-      await prisma.funnelAnalytics.create({
-        data: {
+      const existingFunnelAnalytics = await prisma.funnelAnalytics.findFirst({
+        where: {
           funnelId: funnel.id,
-          date: today,
-          totalStarts,
-          totalCompletions,
-          totalDropoffs: totalStarts - totalCompletions,
-          conversionRate: funnelConversionRate,
+          date: analyticsDate,
+          hour: null,
         },
       });
+
+      if (existingFunnelAnalytics) {
+        await prisma.funnelAnalytics.update({
+          where: { id: existingFunnelAnalytics.id },
+          data: {
+            totalStarts: dailyFunnel.starts,
+            totalCompletions: dailyFunnel.completions,
+            totalDropoffs: dailyFunnel.starts - dailyFunnel.completions,
+            conversionRate: dailyConversionRate,
+          },
+        });
+      } else {
+        await prisma.funnelAnalytics.create({
+          data: {
+            funnelId: funnel.id,
+            date: analyticsDate,
+            totalStarts: dailyFunnel.starts,
+            totalCompletions: dailyFunnel.completions,
+            totalDropoffs: dailyFunnel.starts - dailyFunnel.completions,
+            conversionRate: dailyConversionRate,
+          },
+        });
+      }
     }
 
     const duration = Date.now() - startTime;
@@ -317,16 +371,35 @@ export async function GET(request: NextRequest) {
       },
     });
 
-    console.log(`[Sync] Completed in ${duration}ms - Entries: ${entriesProcessed}, Steps: ${stepsProcessed}`);
+    // Check for missing page indexes (gaps)
+    const allIndexes = Array.from(globalStepMap.keys()).sort((a, b) => a - b);
+    const maxIndex = allIndexes.length > 0 ? allIndexes[allIndexes.length - 1] : 0;
+    const missingIndexes = [];
+    for (let i = 0; i <= maxIndex; i++) {
+      if (!globalStepMap.has(i)) {
+        missingIndexes.push(i);
+      }
+    }
+
+    console.log(`[Sync] Completed in ${duration}ms - Entries: ${entriesProcessed}, Steps: ${stepsProcessed}, Days: ${dailyFunnelData.size}`);
 
     return NextResponse.json({
       success: true,
       entriesProcessed,
       stepsProcessed,
+      daysProcessed: dailyFunnelData.size,
       funnelMetrics: {
         totalStarts,
         totalCompletions,
         conversionRate: funnelConversionRate.toFixed(2),
+      },
+      pageInfo: {
+        totalPagesFound: globalStepMap.size,
+        maxPageIndex: maxIndex,
+        missingIndexes: missingIndexes.length > 0 ? missingIndexes : 'none',
+        pageKeys: Array.from(globalStepMap.entries())
+          .sort((a, b) => a[0] - b[0])
+          .map(([idx, data]) => `${idx}: ${data.pageKey}`),
       },
       duration,
     });
