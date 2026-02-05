@@ -1,14 +1,14 @@
 /**
  * Data Sync Cron Job
  *
- * Fetches funnel data from Embeddables API and stores in database
+ * Recalculates funnel metrics from stored entries (received via webhook)
+ * The Embeddables API doesn't support bulk fetching - data comes via DataPipes webhook
  * Should run every 15-30 minutes via Railway Cron or external cron service
  */
 
 import { NextRequest, NextResponse } from 'next/server';
 import prisma from '@/lib/db/prisma';
-import { embeddables } from '@/lib/integrations/embeddables';
-import { startOfDay, endOfDay } from 'date-fns';
+import { startOfDay, subDays } from 'date-fns';
 
 export const runtime = 'nodejs';
 export const maxDuration = 300; // 5 minutes max execution
@@ -25,26 +25,12 @@ export async function GET(request: NextRequest) {
       return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
     }
 
-    console.log('[Sync] Starting funnel data sync...');
+    console.log('[Sync] Starting funnel metrics recalculation...');
 
-    // Fetch entries from Embeddables
-    const entries = await embeddables.getEntriesPageViews(1000);
-    console.log(`[Sync] Fetched ${entries.length} entries from Embeddables`);
-
-    if (entries.length === 0) {
-      return NextResponse.json({
-        success: true,
-        message: 'No entries to sync',
-        recordsProcessed: 0,
-      });
-    }
-
-    // Process step analytics from entries
-    const stepAnalytics = embeddables.processPageViewsToStepAnalytics(entries);
-    const funnelMetrics = embeddables.calculateFunnelMetrics(entries);
-
-    // Get or create a default funnel (since Embeddables may not have a flows endpoint)
+    const today = startOfDay(new Date());
     const projectId = process.env.EMBEDDABLES_PROJECT_ID || 'pr_WU28KvQa9qZ4BOuW';
+
+    // Get or create a default funnel
     let funnel = await prisma.funnel.findFirst({
       where: { embeddablesId: projectId },
     });
@@ -53,90 +39,33 @@ export async function GET(request: NextRequest) {
       funnel = await prisma.funnel.create({
         data: {
           embeddablesId: projectId,
-          name: 'Main Questionnaire',
-          totalSteps: stepAnalytics.length,
+          name: 'Get Thin MD Quiz',
+          totalSteps: 10,
           status: 'active',
         },
       });
       console.log(`[Sync] Created new funnel: ${funnel.name}`);
-    } else {
-      // Update funnel
-      funnel = await prisma.funnel.update({
-        where: { id: funnel.id },
-        data: {
-          totalSteps: stepAnalytics.length,
-          updatedAt: new Date(),
-        },
-      });
     }
 
-    const today = startOfDay(new Date());
-    let stepsProcessed = 0;
-
-    // Upsert steps and their analytics
-    for (const stepData of stepAnalytics) {
-      // Upsert step
-      const step = await prisma.funnelStep.upsert({
-        where: {
-          funnelId_stepNumber: {
-            funnelId: funnel.id,
-            stepNumber: stepData.stepIndex,
-          },
+    // Get today's entries from FunnelEntry table
+    const todayEntries = await prisma.funnelEntry.findMany({
+      where: {
+        funnelId: funnel.id,
+        createdAt: {
+          gte: today,
         },
-        create: {
-          funnelId: funnel.id,
-          stepNumber: stepData.stepIndex,
-          stepName: stepData.stepName,
-          stepKey: stepData.stepKey,
-        },
-        update: {
-          stepName: stepData.stepName,
-          stepKey: stepData.stepKey,
-        },
-      });
+      },
+    });
 
-      // Find existing step analytics for today or create new
-      const existingStepAnalytics = await prisma.stepAnalytics.findFirst({
-        where: {
-          stepId: step.id,
-          date: today,
-          hour: null,
-          deviceType: null,
-          browser: null,
-        },
-      });
+    console.log(`[Sync] Found ${todayEntries.length} entries for today`);
 
-      if (existingStepAnalytics) {
-        await prisma.stepAnalytics.update({
-          where: { id: existingStepAnalytics.id },
-          data: {
-            entries: stepData.totalViews,
-            exits: stepData.totalExits,
-            conversions: stepData.totalContinues,
-            dropOffRate: stepData.dropOffRate,
-            conversionRate: stepData.conversionRate,
-            avgTimeOnStep: stepData.avgTimeOnStep,
-          },
-        });
-      } else {
-        await prisma.stepAnalytics.create({
-          data: {
-            stepId: step.id,
-            date: today,
-            entries: stepData.totalViews,
-            exits: stepData.totalExits,
-            conversions: stepData.totalContinues,
-            dropOffRate: stepData.dropOffRate,
-            conversionRate: stepData.conversionRate,
-            avgTimeOnStep: stepData.avgTimeOnStep,
-          },
-        });
-      }
+    // Calculate metrics from entries
+    const totalStarts = todayEntries.length;
+    const totalCompletions = todayEntries.filter(e => e.completed).length;
+    const totalDropoffs = totalStarts - totalCompletions;
+    const conversionRate = totalStarts > 0 ? (totalCompletions / totalStarts) * 100 : 0;
 
-      stepsProcessed++;
-    }
-
-    // Find existing funnel analytics for today or create new
+    // Upsert funnel analytics for today
     const existingFunnelAnalytics = await prisma.funnelAnalytics.findFirst({
       where: {
         funnelId: funnel.id,
@@ -151,10 +80,10 @@ export async function GET(request: NextRequest) {
       await prisma.funnelAnalytics.update({
         where: { id: existingFunnelAnalytics.id },
         data: {
-          totalStarts: funnelMetrics.totalStarts,
-          totalCompletions: funnelMetrics.totalCompletions,
-          totalDropoffs: funnelMetrics.totalAbandoned,
-          conversionRate: funnelMetrics.conversionRate,
+          totalStarts,
+          totalCompletions,
+          totalDropoffs,
+          conversionRate,
         },
       });
     } else {
@@ -162,12 +91,74 @@ export async function GET(request: NextRequest) {
         data: {
           funnelId: funnel.id,
           date: today,
-          totalStarts: funnelMetrics.totalStarts,
-          totalCompletions: funnelMetrics.totalCompletions,
-          totalDropoffs: funnelMetrics.totalAbandoned,
-          conversionRate: funnelMetrics.conversionRate,
+          totalStarts,
+          totalCompletions,
+          totalDropoffs,
+          conversionRate,
         },
       });
+    }
+
+    // Recalculate step metrics
+    const steps = await prisma.funnelStep.findMany({
+      where: { funnelId: funnel.id },
+      orderBy: { stepNumber: 'asc' },
+    });
+
+    let stepsProcessed = 0;
+
+    for (const step of steps) {
+      // Count entries that reached this step
+      const entriesAtStep = todayEntries.filter(e => e.lastStepIndex >= step.stepNumber);
+      const entriesPastStep = todayEntries.filter(e => e.lastStepIndex > step.stepNumber || e.completed);
+      const entriesExitedAtStep = todayEntries.filter(
+        e => e.lastStepIndex === step.stepNumber && !e.completed
+      );
+
+      const entries = entriesAtStep.length;
+      const conversions = entriesPastStep.length;
+      const exits = entriesExitedAtStep.length;
+      const dropOffRate = entries > 0 ? (exits / entries) * 100 : 0;
+      const stepConversionRate = entries > 0 ? (conversions / entries) * 100 : 0;
+
+      // Upsert step analytics
+      const existingStepAnalytics = await prisma.stepAnalytics.findFirst({
+        where: {
+          stepId: step.id,
+          date: today,
+          hour: null,
+          deviceType: null,
+          browser: null,
+        },
+      });
+
+      if (existingStepAnalytics) {
+        await prisma.stepAnalytics.update({
+          where: { id: existingStepAnalytics.id },
+          data: {
+            entries,
+            exits,
+            conversions,
+            dropOffRate,
+            conversionRate: stepConversionRate,
+          },
+        });
+      } else {
+        await prisma.stepAnalytics.create({
+          data: {
+            stepId: step.id,
+            date: today,
+            entries,
+            exits,
+            conversions,
+            dropOffRate,
+            conversionRate: stepConversionRate,
+            avgTimeOnStep: 0,
+          },
+        });
+      }
+
+      stepsProcessed++;
     }
 
     const duration = Date.now() - startTime;
@@ -175,28 +166,32 @@ export async function GET(request: NextRequest) {
     // Log sync execution
     await prisma.syncLog.create({
       data: {
-        syncType: 'embeddables_fetch',
+        syncType: 'metrics_recalculation',
         status: 'success',
-        recordsProcessed: entries.length,
+        recordsProcessed: todayEntries.length,
         startedAt: new Date(startTime),
         completedAt: new Date(),
       },
     });
 
     console.log(
-      `[Sync] Completed in ${duration}ms - Entries: ${entries.length}, Steps: ${stepsProcessed}`
+      `[Sync] Completed in ${duration}ms - Entries: ${todayEntries.length}, Steps: ${stepsProcessed}`
     );
 
     return NextResponse.json({
       success: true,
-      entriesProcessed: entries.length,
+      message: 'Metrics recalculated from stored entries',
+      entriesProcessed: todayEntries.length,
       stepsProcessed,
       funnelMetrics: {
-        totalStarts: funnelMetrics.totalStarts,
-        totalCompletions: funnelMetrics.totalCompletions,
-        conversionRate: funnelMetrics.conversionRate,
+        totalStarts,
+        totalCompletions,
+        conversionRate: conversionRate.toFixed(2),
       },
       duration,
+      note: todayEntries.length === 0
+        ? 'No entries yet. Set up Embeddables DataPipe to POST to /api/webhooks/embeddables'
+        : undefined,
     });
   } catch (error) {
     const duration = Date.now() - startTime;
@@ -206,7 +201,7 @@ export async function GET(request: NextRequest) {
     try {
       await prisma.syncLog.create({
         data: {
-          syncType: 'embeddables_fetch',
+          syncType: 'metrics_recalculation',
           status: 'failed',
           recordsProcessed: 0,
           errorMessage,
