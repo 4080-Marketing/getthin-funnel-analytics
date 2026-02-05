@@ -51,23 +51,47 @@ export async function GET(request: NextRequest) {
       throw new Error('EMBEDDABLES_API_KEY or EMBEDDABLES_PROJECT_ID not configured');
     }
 
-    // Fetch entries from Embeddables API
-    const response = await fetch(
-      `https://api.embeddables.com/projects/${projectId}/entries-page-views?limit=1000`,
-      {
-        headers: {
-          'X-Api-Key': apiKey,
-          'Content-Type': 'application/json',
-        },
-      }
-    );
+    // Fetch ALL entries from Embeddables API with pagination
+    const entries: EmbeddablesEntry[] = [];
+    let offset = 0;
+    const limit = 1000;
+    let hasMore = true;
 
-    if (!response.ok) {
-      throw new Error(`Embeddables API error: ${response.status} ${response.statusText}`);
+    while (hasMore) {
+      const response = await fetch(
+        `https://api.embeddables.com/projects/${projectId}/entries-page-views?limit=${limit}&offset=${offset}`,
+        {
+          headers: {
+            'X-Api-Key': apiKey,
+            'Content-Type': 'application/json',
+          },
+        }
+      );
+
+      if (!response.ok) {
+        throw new Error(`Embeddables API error: ${response.status} ${response.statusText}`);
+      }
+
+      const batch: EmbeddablesEntry[] = await response.json();
+      console.log(`[Sync] Fetched batch of ${batch.length} entries (offset: ${offset})`);
+
+      entries.push(...batch);
+
+      // If we got fewer than limit, we've reached the end
+      if (batch.length < limit) {
+        hasMore = false;
+      } else {
+        offset += limit;
+      }
+
+      // Safety limit to prevent infinite loops (max 10,000 entries)
+      if (offset >= 10000) {
+        console.log('[Sync] Reached safety limit of 10,000 entries');
+        hasMore = false;
+      }
     }
 
-    const entries: EmbeddablesEntry[] = await response.json();
-    console.log(`[Sync] Fetched ${entries.length} entries from Embeddables`);
+    console.log(`[Sync] Total entries fetched: ${entries.length}`);
 
     if (entries.length === 0) {
       return NextResponse.json({
