@@ -1,23 +1,32 @@
 import { NextRequest, NextResponse } from 'next/server';
-import { embeddables } from '@/lib/integrations/embeddables';
+import prisma from '@/lib/db/prisma';
 import { subDays, startOfDay, endOfDay, format, eachDayOfInterval } from 'date-fns';
 
 export const dynamic = 'force-dynamic';
 
 /**
  * GET /api/funnels/analytics
- * Get real-time analytics directly from Embeddables API
- * Useful for dashboard when database hasn't been synced yet
+ * Get analytics from the database (populated via webhook)
  */
 export async function GET(request: NextRequest) {
   try {
     const searchParams = request.nextUrl.searchParams;
-    const limit = parseInt(searchParams.get('limit') || '500', 10);
+    const days = parseInt(searchParams.get('days') || '30', 10);
 
-    // Fetch entries from Embeddables
-    const entries = await embeddables.getEntriesPageViews(limit);
+    const endDate = endOfDay(new Date());
+    const startDate = startOfDay(subDays(endDate, days));
 
-    if (!entries || entries.length === 0) {
+    // Get the main funnel
+    const funnel = await prisma.funnel.findFirst({
+      where: { status: 'active' },
+      include: {
+        steps: {
+          orderBy: { stepNumber: 'asc' },
+        },
+      },
+    });
+
+    if (!funnel) {
       return NextResponse.json({
         success: true,
         totalEntries: 0,
@@ -29,69 +38,123 @@ export async function GET(request: NextRequest) {
         },
         steps: [],
         trends: [],
+        message: 'No funnel data yet. Waiting for webhook data from Embeddables.',
       });
     }
 
-    // Calculate funnel metrics
-    const funnelMetrics = embeddables.calculateFunnelMetrics(entries);
+    // Get funnel analytics for the period
+    const funnelAnalytics = await prisma.funnelAnalytics.findMany({
+      where: {
+        funnelId: funnel.id,
+        date: {
+          gte: startDate,
+          lte: endDate,
+        },
+      },
+      orderBy: { date: 'desc' },
+    });
 
-    // Process step analytics
-    const stepAnalytics = embeddables.processPageViewsToStepAnalytics(entries);
+    // Get step analytics
+    const stepAnalytics = await prisma.stepAnalytics.findMany({
+      where: {
+        step: {
+          funnelId: funnel.id,
+        },
+        date: {
+          gte: startDate,
+          lte: endDate,
+        },
+      },
+      include: {
+        step: true,
+      },
+      orderBy: [
+        { step: { stepNumber: 'asc' } },
+        { date: 'desc' },
+      ],
+    });
 
-    // Calculate daily trends
-    const endDate = endOfDay(new Date());
-    const startDate = startOfDay(subDays(endDate, 30));
-    const dateRange = eachDayOfInterval({ start: startDate, end: endDate });
+    // Calculate totals
+    const totalStarts = funnelAnalytics.reduce((sum, a) => sum + a.totalStarts, 0);
+    const totalCompletions = funnelAnalytics.reduce((sum, a) => sum + a.totalCompletions, 0);
+    const conversionRate = totalStarts > 0 ? (totalCompletions / totalStarts) * 100 : 0;
 
-    const dailyMetrics = new Map<string, { starts: number; completions: number }>();
+    // Group step analytics by step
+    const stepMetrics = new Map<string, {
+      stepNumber: number;
+      stepName: string;
+      stepKey: string | null;
+      entries: number;
+      exits: number;
+      conversions: number;
+      avgDropOffRate: number;
+      avgConversionRate: number;
+    }>();
 
-    // Initialize all dates with zeros
-    for (const date of dateRange) {
-      dailyMetrics.set(format(date, 'yyyy-MM-dd'), { starts: 0, completions: 0 });
-    }
-
-    // Aggregate by date
-    for (const entry of entries) {
-      const dateKey = format(new Date(entry.createdAt), 'yyyy-MM-dd');
-      const existing = dailyMetrics.get(dateKey);
+    for (const sa of stepAnalytics) {
+      const key = sa.step.id;
+      const existing = stepMetrics.get(key);
       if (existing) {
-        existing.starts++;
-        if (entry.completed) {
-          existing.completions++;
-        }
+        existing.entries += sa.entries;
+        existing.exits += sa.exits;
+        existing.conversions += sa.conversions;
+      } else {
+        stepMetrics.set(key, {
+          stepNumber: sa.step.stepNumber,
+          stepName: sa.step.stepName,
+          stepKey: sa.step.stepKey,
+          entries: sa.entries,
+          exits: sa.exits,
+          conversions: sa.conversions,
+          avgDropOffRate: sa.dropOffRate,
+          avgConversionRate: sa.conversionRate,
+        });
       }
     }
 
-    const trends = Array.from(dailyMetrics.entries())
-      .map(([date, metrics]) => ({
-        date,
-        totalStarts: metrics.starts,
-        totalCompletions: metrics.completions,
-        conversionRate: metrics.starts > 0 ? (metrics.completions / metrics.starts) * 100 : 0,
-      }))
-      .sort((a, b) => a.date.localeCompare(b.date));
+    // Build trends from funnel analytics
+    const dateRange = eachDayOfInterval({ start: startDate, end: endDate });
+    const analyticsMap = new Map(
+      funnelAnalytics.map(a => [format(a.date, 'yyyy-MM-dd'), a])
+    );
+
+    const trends = dateRange.map(date => {
+      const dateKey = format(date, 'yyyy-MM-dd');
+      const analytics = analyticsMap.get(dateKey);
+      return {
+        date: dateKey,
+        totalStarts: analytics?.totalStarts || 0,
+        totalCompletions: analytics?.totalCompletions || 0,
+        conversionRate: analytics?.conversionRate || 0,
+      };
+    });
 
     return NextResponse.json({
       success: true,
-      totalEntries: entries.length,
-      metrics: {
-        totalStarts: funnelMetrics.totalStarts,
-        totalCompletions: funnelMetrics.totalCompletions,
-        totalAbandoned: funnelMetrics.totalAbandoned,
-        conversionRate: funnelMetrics.conversionRate,
-        abandonmentRate: funnelMetrics.abandonmentRate,
+      funnel: {
+        id: funnel.id,
+        name: funnel.name,
+        totalSteps: funnel.totalSteps,
       },
-      steps: stepAnalytics.map((step) => ({
-        stepNumber: step.stepIndex + 1,
-        stepName: step.stepName,
-        stepKey: step.stepKey,
-        entries: step.totalViews,
-        exits: step.totalExits,
-        continues: step.totalContinues,
-        conversionRate: step.conversionRate,
-        dropOffRate: step.dropOffRate,
-        avgTimeOnStep: step.avgTimeOnStep,
-      })),
+      metrics: {
+        totalStarts,
+        totalCompletions,
+        totalAbandoned: totalStarts - totalCompletions,
+        conversionRate: conversionRate.toFixed(2),
+        abandonmentRate: totalStarts > 0 ? (((totalStarts - totalCompletions) / totalStarts) * 100).toFixed(2) : '0',
+      },
+      steps: Array.from(stepMetrics.values())
+        .sort((a, b) => a.stepNumber - b.stepNumber)
+        .map(step => ({
+          stepNumber: step.stepNumber,
+          stepName: step.stepName,
+          stepKey: step.stepKey,
+          entries: step.entries,
+          exits: step.exits,
+          continues: step.conversions,
+          conversionRate: step.avgConversionRate,
+          dropOffRate: step.avgDropOffRate,
+        })),
       trends,
     });
   } catch (error) {
