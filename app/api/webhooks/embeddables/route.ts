@@ -26,7 +26,6 @@ interface EmbeddablesWebhookPayload {
   timeSpent?: number;
   createdAt?: string;
   updatedAt?: string;
-  userData?: Record<string, unknown>;
   pageViews?: Array<{
     index: number;
     pageKey?: string;
@@ -78,16 +77,17 @@ export async function POST(request: NextRequest) {
         funnelId: funnel.id,
         completed: payload.completed || false,
         lastStepIndex: payload.currentPageIndex || 0,
+        lastStepKey: payload.currentPageKey,
         totalSteps: payload.totalPages || 0,
         timeSpent: payload.timeSpent || 0,
-        userData: payload.userData || {},
         createdAt: payload.createdAt ? new Date(payload.createdAt) : new Date(),
+        updatedAt: new Date(),
       },
       update: {
         completed: payload.completed || false,
         lastStepIndex: payload.currentPageIndex || 0,
+        lastStepKey: payload.currentPageKey,
         timeSpent: payload.timeSpent || 0,
-        userData: payload.userData || {},
         updatedAt: new Date(),
       },
     });
