@@ -14,7 +14,7 @@ export async function GET() {
   }
 
   const response = await fetch(
-    `https://api.embeddables.com/projects/${projectId}/entries-page-views?limit=100`,
+    `https://api.embeddables.com/projects/${projectId}/entries-page-views?limit=1000`,
     {
       headers: {
         'X-Api-Key': apiKey,
@@ -77,10 +77,21 @@ export async function GET() {
     stepDistribution[max] = (stepDistribution[max] || 0) + 1;
   }
 
+  const firstStep = steps.length > 0 ? steps[0] : null;
+  const lastStep = steps.length > 0 ? steps[steps.length - 1] : null;
+
+  // Find entries that reached the last step
+  const lastStepIndex = lastStep?.index ?? 0;
+  const entriesReachingLastStep = maxStepsPerEntry.filter(max => max >= lastStepIndex).length;
+
   return NextResponse.json({
     totalEntries: entries.length,
     completedWithProductData: completedCount,
     totalSteps: steps.length,
+    firstStep,
+    lastStep,
+    entriesReachingLastStep,
+    suggestedCompletionStep: lastStepIndex,
     steps,
     maxStepDistribution: stepDistribution,
     sampleEntry: entries[0] ? {
