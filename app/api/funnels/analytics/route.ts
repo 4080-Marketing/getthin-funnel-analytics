@@ -140,8 +140,8 @@ export async function GET(request: NextRequest) {
         totalStarts,
         totalCompletions,
         totalAbandoned: totalStarts - totalCompletions,
-        conversionRate: conversionRate.toFixed(2),
-        abandonmentRate: totalStarts > 0 ? (((totalStarts - totalCompletions) / totalStarts) * 100).toFixed(2) : '0',
+        conversionRate: Number(conversionRate.toFixed(2)),
+        abandonmentRate: totalStarts > 0 ? Number((((totalStarts - totalCompletions) / totalStarts) * 100).toFixed(2)) : 0,
       },
       steps: Array.from(stepMetrics.values())
         .sort((a, b) => a.stepNumber - b.stepNumber)
