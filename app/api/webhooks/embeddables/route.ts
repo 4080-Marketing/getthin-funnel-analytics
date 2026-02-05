@@ -1,9 +1,8 @@
 /**
  * Embeddables Webhook Endpoint
  *
- * Receives data pushed from Embeddables DataPipes
- * Set up a DataPipe in Embeddables to POST to:
- * https://your-app.railway.app/api/webhooks/embeddables
+ * Receives data pushed from Embeddables Webhooks
+ * Events: user.submitted.test, user.paid.test
  */
 
 import { NextRequest, NextResponse } from 'next/server';
@@ -12,27 +11,25 @@ import { startOfDay } from 'date-fns';
 
 export const runtime = 'nodejs';
 
-// Embeddables DataPipe payload structure
+// Embeddables webhook payload - flexible to handle various event types
 interface EmbeddablesWebhookPayload {
-  event: 'entry.created' | 'entry.updated' | 'entry.completed' | 'page_view';
-  entryId: string;
-  flowId?: string;
-  projectId?: string;
-  completed?: boolean;
-  currentPageIndex?: number;
-  currentPageKey?: string;
-  currentPageName?: string;
-  totalPages?: number;
-  timeSpent?: number;
-  createdAt?: string;
-  updatedAt?: string;
-  pageViews?: Array<{
-    index: number;
-    pageKey?: string;
-    pageName?: string;
+  type: string; // 'user.submitted.test', 'user.paid.test'
+  data: {
+    id?: string;
+    entryId?: string;
+    userId?: string;
+    email?: string;
+    flowId?: string;
+    projectId?: string;
+    completed?: boolean;
+    currentPageIndex?: number;
+    totalPages?: number;
     timeSpent?: number;
-    viewedAt?: string;
-  }>;
+    createdAt?: string;
+    updatedAt?: string;
+    // Allow any additional fields
+    [key: string]: unknown;
+  };
 }
 
 export async function POST(request: NextRequest) {
@@ -40,17 +37,28 @@ export async function POST(request: NextRequest) {
     // Optional: Verify webhook secret
     const webhookSecret = process.env.EMBEDDABLES_WEBHOOK_SECRET;
     if (webhookSecret) {
-      const signature = request.headers.get('x-webhook-signature');
-      if (signature !== webhookSecret) {
+      const signature = request.headers.get('x-webhook-signature') ||
+                       request.headers.get('webhook-secret') ||
+                       request.headers.get('authorization');
+      if (signature !== webhookSecret && signature !== `Bearer ${webhookSecret}`) {
         console.warn('[Webhook] Invalid signature');
         return NextResponse.json({ error: 'Invalid signature' }, { status: 401 });
       }
     }
 
-    const payload: EmbeddablesWebhookPayload = await request.json();
-    console.log(`[Webhook] Received event: ${payload.event} for entry: ${payload.entryId}`);
+    const rawPayload = await request.json();
+
+    // Log the full payload for debugging
+    console.log('[Webhook] Received payload:', JSON.stringify(rawPayload, null, 2));
+
+    // Handle both nested {type, data} format and flat format
+    const eventType = rawPayload.type || rawPayload.event || 'unknown';
+    const payload = rawPayload.data || rawPayload;
+
+    console.log(`[Webhook] Processing event: ${eventType}`);
 
     const projectId = payload.projectId || payload.flowId || process.env.EMBEDDABLES_PROJECT_ID || 'default';
+    const entryId = payload.entryId || payload.id || payload.userId || `entry_${Date.now()}`;
     const today = startOfDay(new Date());
 
     // Get or create funnel
@@ -62,94 +70,39 @@ export async function POST(request: NextRequest) {
       funnel = await prisma.funnel.create({
         data: {
           embeddablesId: projectId,
-          name: 'Main Questionnaire',
+          name: 'Get Thin MD Quiz',
           totalSteps: payload.totalPages || 10,
           status: 'active',
         },
       });
+      console.log(`[Webhook] Created funnel: ${funnel.id}`);
     }
+
+    // Determine if this is a completion or start based on event type
+    const isSubmission = eventType === 'user.submitted.test' || eventType.includes('submitted');
+    const isPaid = eventType === 'user.paid.test' || eventType.includes('paid');
+    const isCompleted = isSubmission || payload.completed === true;
 
     // Store the entry
     await prisma.funnelEntry.upsert({
-      where: { entryId: payload.entryId },
+      where: { entryId: entryId },
       create: {
-        entryId: payload.entryId,
+        entryId: entryId,
         funnelId: funnel.id,
-        completed: payload.completed || false,
-        lastStepIndex: payload.currentPageIndex || 0,
-        lastStepKey: payload.currentPageKey,
-        totalSteps: payload.totalPages || 0,
+        completed: isCompleted,
+        lastStepIndex: payload.currentPageIndex || (isCompleted ? funnel.totalSteps : 0),
+        totalSteps: payload.totalPages || funnel.totalSteps,
         timeSpent: payload.timeSpent || 0,
         createdAt: payload.createdAt ? new Date(payload.createdAt) : new Date(),
         updatedAt: new Date(),
       },
       update: {
-        completed: payload.completed || false,
-        lastStepIndex: payload.currentPageIndex || 0,
-        lastStepKey: payload.currentPageKey,
-        timeSpent: payload.timeSpent || 0,
+        completed: isCompleted,
+        lastStepIndex: payload.currentPageIndex || (isCompleted ? funnel.totalSteps : undefined),
+        timeSpent: payload.timeSpent || undefined,
         updatedAt: new Date(),
       },
     });
-
-    // Process page views if available
-    if (payload.pageViews && payload.pageViews.length > 0) {
-      for (const pageView of payload.pageViews) {
-        // Ensure step exists
-        const step = await prisma.funnelStep.upsert({
-          where: {
-            funnelId_stepNumber: {
-              funnelId: funnel.id,
-              stepNumber: pageView.index,
-            },
-          },
-          create: {
-            funnelId: funnel.id,
-            stepNumber: pageView.index,
-            stepName: pageView.pageName || `Step ${pageView.index + 1}`,
-            stepKey: pageView.pageKey,
-          },
-          update: {
-            stepName: pageView.pageName || `Step ${pageView.index + 1}`,
-            stepKey: pageView.pageKey,
-          },
-        });
-
-        // Update step analytics
-        const existingAnalytics = await prisma.stepAnalytics.findFirst({
-          where: {
-            stepId: step.id,
-            date: today,
-            hour: null,
-            deviceType: null,
-            browser: null,
-          },
-        });
-
-        if (existingAnalytics) {
-          await prisma.stepAnalytics.update({
-            where: { id: existingAnalytics.id },
-            data: {
-              entries: { increment: 1 },
-              avgTimeOnStep: pageView.timeSpent || existingAnalytics.avgTimeOnStep,
-            },
-          });
-        } else {
-          await prisma.stepAnalytics.create({
-            data: {
-              stepId: step.id,
-              date: today,
-              entries: 1,
-              exits: 0,
-              conversions: 0,
-              dropOffRate: 0,
-              conversionRate: 0,
-              avgTimeOnStep: pageView.timeSpent || 0,
-            },
-          });
-        }
-      }
-    }
 
     // Update funnel analytics
     const existingFunnelAnalytics = await prisma.funnelAnalytics.findFirst({
@@ -165,38 +118,38 @@ export async function POST(request: NextRequest) {
     if (existingFunnelAnalytics) {
       const updateData: Record<string, unknown> = {};
 
-      if (payload.event === 'entry.created') {
-        updateData.totalStarts = { increment: 1 };
-      }
-      if (payload.completed) {
+      // Always increment starts for new entries
+      updateData.totalStarts = { increment: 1 };
+
+      if (isCompleted) {
         updateData.totalCompletions = { increment: 1 };
       }
 
-      if (Object.keys(updateData).length > 0) {
-        await prisma.funnelAnalytics.update({
-          where: { id: existingFunnelAnalytics.id },
-          data: updateData,
-        });
-      }
+      await prisma.funnelAnalytics.update({
+        where: { id: existingFunnelAnalytics.id },
+        data: updateData,
+      });
     } else {
       await prisma.funnelAnalytics.create({
         data: {
           funnelId: funnel.id,
           date: today,
-          totalStarts: payload.event === 'entry.created' ? 1 : 0,
-          totalCompletions: payload.completed ? 1 : 0,
+          totalStarts: 1,
+          totalCompletions: isCompleted ? 1 : 0,
           totalDropoffs: 0,
-          conversionRate: 0,
+          conversionRate: isCompleted ? 100 : 0,
         },
       });
     }
 
-    console.log(`[Webhook] Successfully processed entry: ${payload.entryId}`);
+    console.log(`[Webhook] Successfully processed: ${eventType} for entry: ${entryId}`);
 
     return NextResponse.json({
       success: true,
-      entryId: payload.entryId,
-      event: payload.event,
+      entryId: entryId,
+      event: eventType,
+      isSubmission,
+      isPaid,
     });
   } catch (error) {
     console.error('[Webhook] Error processing webhook:', error);
@@ -216,6 +169,7 @@ export async function GET() {
   return NextResponse.json({
     status: 'ok',
     endpoint: 'Embeddables Webhook',
+    supportedEvents: ['user.submitted.test', 'user.paid.test'],
     message: 'POST entry data to this endpoint',
   });
 }
