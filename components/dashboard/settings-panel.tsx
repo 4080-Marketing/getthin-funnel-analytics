@@ -10,7 +10,8 @@ interface CustomConversion {
   id: string
   name: string
   stepKey?: string        // Single step (backward compat)
-  stepKeys?: string[]     // Multiple steps (formula = sum)
+  stepKeys?: string[]     // Multiple steps
+  formula?: 'sum' | 'max' // sum = add entries, max = take highest (avoids double-counting)
   stepName: string
 }
 
@@ -38,6 +39,8 @@ function ConversionForm({
   setFormName,
   formStepKeys,
   toggleStepInFormula,
+  formFormula,
+  setFormFormula,
   availableSteps,
   onSave,
   onCancel,
@@ -47,6 +50,8 @@ function ConversionForm({
   setFormName: (v: string) => void
   formStepKeys: string[]
   toggleStepInFormula: (key: string) => void
+  formFormula: 'sum' | 'max'
+  setFormFormula: (v: 'sum' | 'max') => void
   availableSteps: Array<{ stepKey: string; stepName: string; stepNumber: number }>
   onSave: () => void
   onCancel: () => void
@@ -65,9 +70,34 @@ function ConversionForm({
           autoFocus
         />
       </div>
+      {formStepKeys.length > 1 && (
+        <div>
+          <label className="block text-sm font-medium text-gray-700 mb-1">Formula</label>
+          <div className="flex gap-3">
+            <label className="flex items-center gap-1.5 text-sm cursor-pointer">
+              <input
+                type="radio"
+                checked={formFormula === 'max'}
+                onChange={() => setFormFormula('max')}
+                className="text-violet-600 focus:ring-violet-500"
+              />
+              <span>Max (best for overlapping steps like purchases)</span>
+            </label>
+            <label className="flex items-center gap-1.5 text-sm cursor-pointer">
+              <input
+                type="radio"
+                checked={formFormula === 'sum'}
+                onChange={() => setFormFormula('sum')}
+                className="text-violet-600 focus:ring-violet-500"
+              />
+              <span>Sum (add counts together)</span>
+            </label>
+          </div>
+        </div>
+      )}
       <div>
         <label className="block text-sm font-medium text-gray-700 mb-1">
-          Steps {formStepKeys.length > 1 && <span className="text-violet-600">(formula: sum of {formStepKeys.length} steps)</span>}
+          Steps {formStepKeys.length > 1 && <span className="text-violet-600">({formFormula} of {formStepKeys.length} steps)</span>}
         </label>
         <div className="max-h-48 overflow-y-auto border rounded-lg bg-white p-2 space-y-1">
           {availableSteps.map((step) => {
@@ -127,18 +157,21 @@ export function SettingsPanel({
   const [editingId, setEditingId] = useState<string | null>(null)
   const [formName, setFormName] = useState("")
   const [formStepKeys, setFormStepKeys] = useState<string[]>([])
+  const [formFormula, setFormFormula] = useState<'sum' | 'max'>('sum')
 
   const resetForm = () => {
     setShowForm(false)
     setEditingId(null)
     setFormName("")
     setFormStepKeys([])
+    setFormFormula('sum')
   }
 
   const startAdd = () => {
     setEditingId(null)
     setFormName("")
     setFormStepKeys([availableSteps[0]?.stepKey || ""])
+    setFormFormula('sum')
     setShowForm(true)
   }
 
@@ -146,6 +179,7 @@ export function SettingsPanel({
     setEditingId(conv.id)
     setFormName(conv.name)
     setFormStepKeys(conv.stepKeys || (conv.stepKey ? [conv.stepKey] : []))
+    setFormFormula(conv.formula || 'sum')
     setShowForm(true)
   }
 
@@ -161,20 +195,19 @@ export function SettingsPanel({
     if (!formName.trim() || formStepKeys.length === 0) return
     const stepNames = formStepKeys
       .map(k => availableSteps.find(s => s.stepKey === k)?.stepName || k)
-      .join(' + ')
+      .join(formStepKeys.length > 1 ? ' / ' : '')
+
+    const convData: Omit<CustomConversion, 'id'> = {
+      name: formName.trim(),
+      stepKeys: formStepKeys,
+      formula: formStepKeys.length > 1 ? formFormula : undefined,
+      stepName: stepNames,
+    }
 
     if (editingId) {
-      onEditConversion?.(editingId, {
-        name: formName.trim(),
-        stepKeys: formStepKeys,
-        stepName: stepNames,
-      })
+      onEditConversion?.(editingId, convData)
     } else {
-      onAddConversion?.({
-        name: formName.trim(),
-        stepKeys: formStepKeys,
-        stepName: stepNames,
-      })
+      onAddConversion?.(convData)
     }
     resetForm()
   }
@@ -207,6 +240,8 @@ export function SettingsPanel({
                   setFormName={setFormName}
                   formStepKeys={formStepKeys}
                   toggleStepInFormula={toggleStepInFormula}
+                  formFormula={formFormula}
+                  setFormFormula={setFormFormula}
                   availableSteps={availableSteps}
                   onSave={saveForm}
                   onCancel={resetForm}
@@ -221,7 +256,9 @@ export function SettingsPanel({
                   <div className="flex-1 min-w-0">
                     <p className="font-medium text-gray-900 truncate">{conv.name}</p>
                     <p className="text-sm text-gray-500 truncate">
-                      {(conv.stepKeys?.length || 0) > 1 ? 'Formula: ' : 'Step: '}
+                      {(conv.stepKeys?.length || 0) > 1
+                        ? `Formula (${conv.formula || 'sum'}): `
+                        : 'Step: '}
                       {conv.stepName}
                     </p>
                   </div>
@@ -250,6 +287,8 @@ export function SettingsPanel({
               setFormName={setFormName}
               formStepKeys={formStepKeys}
               toggleStepInFormula={toggleStepInFormula}
+              formFormula={formFormula}
+              setFormFormula={setFormFormula}
               availableSteps={availableSteps}
               onSave={saveForm}
               onCancel={resetForm}
