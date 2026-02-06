@@ -57,7 +57,14 @@ export async function POST(request: NextRequest) {
 
     console.log(`[Webhook] Processing event: ${eventType}`);
 
-    const projectId = payload.projectId || payload.flowId || process.env.EMBEDDABLES_PROJECT_ID || 'default';
+    const projectId = payload.projectId || payload.flowId || process.env.EMBEDDABLES_PROJECT_ID;
+    if (!projectId) {
+      console.error('[Webhook] No projectId found in payload or environment');
+      return NextResponse.json(
+        { error: 'Missing projectId - configure EMBEDDABLES_PROJECT_ID or include in payload' },
+        { status: 400 }
+      );
+    }
     const entryId = payload.entryId || payload.id || payload.userId || `entry_${Date.now()}`;
     const today = startOfDay(new Date());
 
@@ -116,18 +123,21 @@ export async function POST(request: NextRequest) {
     });
 
     if (existingFunnelAnalytics) {
-      const updateData: Record<string, unknown> = {};
-
-      // Always increment starts for new entries
-      updateData.totalStarts = { increment: 1 };
-
-      if (isCompleted) {
-        updateData.totalCompletions = { increment: 1 };
-      }
+      // Calculate new totals
+      const newTotalStarts = existingFunnelAnalytics.totalStarts + 1;
+      const newTotalCompletions = existingFunnelAnalytics.totalCompletions + (isCompleted ? 1 : 0);
+      const newConversionRate = newTotalStarts > 0
+        ? (newTotalCompletions / newTotalStarts) * 100
+        : 0;
 
       await prisma.funnelAnalytics.update({
         where: { id: existingFunnelAnalytics.id },
-        data: updateData,
+        data: {
+          totalStarts: newTotalStarts,
+          totalCompletions: newTotalCompletions,
+          totalDropoffs: newTotalStarts - newTotalCompletions,
+          conversionRate: newConversionRate,
+        },
       });
     } else {
       await prisma.funnelAnalytics.create({

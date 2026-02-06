@@ -1,5 +1,6 @@
 import { NextRequest, NextResponse } from 'next/server';
 import prisma from '@/lib/db/prisma';
+import { Prisma } from '@prisma/client';
 
 export const dynamic = 'force-dynamic';
 
@@ -15,7 +16,7 @@ export async function GET(request: NextRequest) {
     const funnelId = searchParams.get('funnelId');
     const limit = parseInt(searchParams.get('limit') || '50', 10);
 
-    const where: any = {};
+    const where: Prisma.AlertWhereInput = {};
 
     if (status) {
       where.status = status;

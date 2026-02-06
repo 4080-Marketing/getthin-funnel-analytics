@@ -89,6 +89,8 @@ export async function GET(request: NextRequest) {
       conversions: number;
       avgDropOffRate: number;
       avgConversionRate: number;
+      avgTimeOnStep: number;
+      timeOnStepCount: number; // For calculating weighted average
     }>();
 
     // Initialize ALL steps with zero values first
@@ -102,6 +104,8 @@ export async function GET(request: NextRequest) {
         conversions: 0,
         avgDropOffRate: 0,
         avgConversionRate: 0,
+        avgTimeOnStep: 0,
+        timeOnStepCount: 0,
       });
     }
 
@@ -113,6 +117,11 @@ export async function GET(request: NextRequest) {
         existing.entries += sa.entries;
         existing.exits += sa.exits;
         existing.conversions += sa.conversions;
+        // Accumulate time for weighted average
+        if (sa.avgTimeOnStep && sa.avgTimeOnStep > 0) {
+          existing.avgTimeOnStep += sa.avgTimeOnStep * sa.entries;
+          existing.timeOnStepCount += sa.entries;
+        }
         // Recalculate rates based on totals
         existing.avgDropOffRate = existing.entries > 0
           ? (existing.exits / existing.entries) * 100
@@ -171,6 +180,9 @@ export async function GET(request: NextRequest) {
           continues: step.conversions,
           conversionRate: step.avgConversionRate,
           dropOffRate: step.avgDropOffRate,
+          avgTimeOnStep: step.timeOnStepCount > 0
+            ? Math.round(step.avgTimeOnStep / step.timeOnStepCount)
+            : 0,
         })),
       trends,
     });
