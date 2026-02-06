@@ -1,4 +1,5 @@
 import { NextResponse } from 'next/server';
+import { FUNNEL_PAGES } from '@/lib/funnel-pages';
 
 export const dynamic = 'force-dynamic';
 
@@ -84,6 +85,25 @@ export async function GET() {
   const lastStepIndex = lastStep?.index ?? 0;
   const entriesReachingLastStep = maxStepsPerEntry.filter(max => max >= lastStepIndex).length;
 
+  // Detect duplicate page_keys at different indices
+  const keyToIndices = new Map<string, number[]>();
+  for (const step of steps) {
+    const indices = keyToIndices.get(step.key) || [];
+    indices.push(step.index);
+    keyToIndices.set(step.key, indices);
+  }
+  const duplicateKeys = Array.from(keyToIndices.entries())
+    .filter(([, indices]) => indices.length > 1)
+    .map(([key, indices]) => ({ key, indices }));
+
+  // Map API keys to our page definitions
+  const apiKeysSet = new Set(steps.map(s => s.key));
+  const definedKeysSet = new Set(FUNNEL_PAGES.map(p => p.pageKey));
+  const unmappedApiKeys = Array.from(apiKeysSet).filter(k => !definedKeysSet.has(k));
+  const unusedDefinedKeys = FUNNEL_PAGES
+    .filter(p => !apiKeysSet.has(p.pageKey))
+    .map(p => ({ pageNumber: p.pageNumber, pageKey: p.pageKey, pageName: p.pageName }));
+
   return NextResponse.json({
     totalEntries: entries.length,
     completedWithProductData: completedCount,
@@ -94,6 +114,13 @@ export async function GET() {
     suggestedCompletionStep: lastStepIndex,
     steps,
     maxStepDistribution: stepDistribution,
+    dataQuality: {
+      duplicateKeys: duplicateKeys.length > 0 ? duplicateKeys : 'none',
+      unmappedApiKeys: unmappedApiKeys.length > 0 ? unmappedApiKeys : 'none',
+      unusedDefinedPages: unusedDefinedKeys.length > 0 ? unusedDefinedKeys : 'none',
+      totalDefinedPages: FUNNEL_PAGES.length,
+      totalApiSteps: steps.length,
+    },
     sampleEntry: entries[0] ? {
       entry_id: entries[0].entry_id,
       page_views_count: entries[0].page_views?.length,
