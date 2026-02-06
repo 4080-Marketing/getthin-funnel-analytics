@@ -34,16 +34,15 @@ export async function GET(request: NextRequest) {
   const startTime = Date.now();
 
   try {
-    // Verify cron secret for external calls.
-    // Internal calls (from the browser via the dashboard Sync button) include
-    // a Referer/Origin header from the same site and don't need the secret.
+    // Auth: allow external cron (Bearer token) and dashboard Sync button (same-origin)
     const authHeader = request.headers.get('authorization');
     const cronSecret = process.env.CRON_SECRET;
     const referer = request.headers.get('referer') || '';
-    const origin = request.headers.get('origin') || '';
-    const appUrl = process.env.NEXT_PUBLIC_APP_URL || process.env.RAILWAY_PUBLIC_DOMAIN || '';
-    const isInternalCall = (referer && referer.includes('/dashboard')) ||
-                           (origin && appUrl && origin.includes(appUrl));
+    const secFetchSite = request.headers.get('sec-fetch-site') || '';
+
+    // sec-fetch-site is set by browsers automatically and reliably for fetch() calls
+    const isInternalCall = secFetchSite === 'same-origin' ||
+                           referer.includes('/dashboard');
 
     if (cronSecret && !isInternalCall && authHeader !== `Bearer ${cronSecret}`) {
       return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
@@ -149,54 +148,54 @@ export async function GET(request: NextRequest) {
         data: {
           embeddablesId: projectId,
           name: 'Get Thin MD Quiz',
-          totalSteps: 20,
+          totalSteps: FUNNEL_PAGES.length,
           status: 'active',
         },
       });
     }
 
     // Helper function to check if entry completed a purchase
-    // Uses the static page definitions from funnel-pages.ts
     const hasCompletedPurchase = (pageViews: EmbeddablesEntry['page_views']) => {
       if (!pageViews || pageViews.length === 0) return false;
-      // Check if any page_key is a purchase completion page
-      // payment_successful (page 53) or asnyc_confirmation_to_redirect (page 54)
       return pageViews.some(pv => isPurchaseComplete(pv.page_key));
     };
 
-    // Create all 55 page step definitions upfront
-    for (const pageDef of FUNNEL_PAGES) {
-      await prisma.funnelStep.upsert({
-        where: {
-          funnelId_stepNumber: {
+    // Create all 55 page step definitions upfront (batch with transaction)
+    await prisma.$transaction(
+      FUNNEL_PAGES.map(pageDef =>
+        prisma.funnelStep.upsert({
+          where: {
+            funnelId_stepNumber: {
+              funnelId: funnel.id,
+              stepNumber: pageDef.pageNumber,
+            },
+          },
+          create: {
             funnelId: funnel.id,
             stepNumber: pageDef.pageNumber,
+            stepName: pageDef.pageName,
+            stepKey: pageDef.pageKey,
           },
-        },
-        create: {
-          funnelId: funnel.id,
-          stepNumber: pageDef.pageNumber,
-          stepName: pageDef.pageName,
-          stepKey: pageDef.pageKey,
-        },
-        update: {
-          stepName: pageDef.pageName,
-          stepKey: pageDef.pageKey,
-        },
-      });
-    }
+          update: {
+            stepName: pageDef.pageName,
+            stepKey: pageDef.pageKey,
+          },
+        })
+      )
+    );
 
-    // Update funnel total steps to 55
+    // Update funnel total steps
     await prisma.funnel.update({
       where: { id: funnel.id },
       data: { totalSteps: FUNNEL_PAGES.length },
     });
 
-    // Process entries and store in database
+    // Process entries: aggregate by date and page_key
+    // NOTE: FunnelEntry upserts removed - that table is write-only and
+    // was causing timeouts (thousands of individual DB writes).
+    // The dashboard reads from StepAnalytics and FunnelAnalytics only.
     let entriesProcessed = 0;
 
-    // Group analytics by date, keyed by pageKey (not page_index)
-    // This maps page_key to analytics data per day
     const dailyStepData = new Map<string, Map<string, {
       views: number;
       exits: number;
@@ -209,12 +208,11 @@ export async function GET(request: NextRequest) {
     }>();
 
     for (const entry of entries) {
-      // Use entry's created_at date for analytics (UTC midnight, timezone-independent)
+      // Use entry's created_at date for analytics (UTC midnight)
       const d = new Date(entry.created_at);
       const entryDate = new Date(Date.UTC(d.getUTCFullYear(), d.getUTCMonth(), d.getUTCDate()));
       const dateKey = entryDate.toISOString();
 
-      // Initialize daily maps if needed
       if (!dailyStepData.has(dateKey)) {
         dailyStepData.set(dateKey, new Map());
       }
@@ -225,45 +223,16 @@ export async function GET(request: NextRequest) {
       const dailySteps = dailyStepData.get(dateKey)!;
       const dailyFunnel = dailyFunnelData.get(dateKey)!;
 
-      // Determine if entry completed a purchase
       const pageViews = entry.page_views || [];
-      const maxPageIndex = pageViews.length > 0
-        ? Math.max(...pageViews.map(pv => pv.page_index))
-        : 0;
       const isCompleted = hasCompletedPurchase(pageViews);
 
-      // Update daily funnel counts
       dailyFunnel.starts++;
       if (isCompleted) {
         dailyFunnel.completions++;
       }
 
-      // Upsert entry
-      await prisma.funnelEntry.upsert({
-        where: { entryId: entry.entry_id },
-        create: {
-          entryId: entry.entry_id,
-          funnelId: funnel.id,
-          completed: isCompleted,
-          lastStepIndex: maxPageIndex,
-          totalSteps: pageViews.length,
-          timeSpent: 0,
-          createdAt: new Date(entry.created_at),
-          updatedAt: new Date(entry.updated_at),
-        },
-        update: {
-          completed: isCompleted,
-          lastStepIndex: maxPageIndex,
-          totalSteps: pageViews.length,
-          updatedAt: new Date(entry.updated_at),
-        },
-      });
-
-      // Process page views for step analytics (keyed by page_key)
-      // Deduplicate by page_key: keep only the LAST occurrence of each key
-      // per entry. This handles conditional branching where the same page
-      // appears at multiple indices (e.g., social_proof at index 27 and 29).
-      // Using last occurrence ensures correct exit attribution.
+      // Deduplicate by page_key per entry: keep only the LAST occurrence.
+      // Handles conditional branching where same page appears at multiple indices.
       const lastOccurrenceByKey = new Map<string, { arrayPosition: number; pageIndex: number }>();
       for (let i = 0; i < pageViews.length; i++) {
         const pv = pageViews[i];
@@ -276,19 +245,13 @@ export async function GET(request: NextRequest) {
         const isLastStep = occurrence.arrayPosition === lastArrayPosition;
         const isExit = isLastStep && !isCompleted;
 
-        const existing = dailySteps.get(pageKey) || {
-          views: 0,
-          exits: 0,
-          continues: 0,
-        };
-
+        const existing = dailySteps.get(pageKey) || { views: 0, exits: 0, continues: 0 };
         existing.views++;
         if (isExit) {
           existing.exits++;
         } else {
           existing.continues++;
         }
-
         dailySteps.set(pageKey, existing);
       }
 
@@ -300,7 +263,6 @@ export async function GET(request: NextRequest) {
     for (const [, dailySteps] of dailyStepData) {
       for (const pageKey of dailySteps.keys()) {
         if (!pageKeyIndexMap.has(pageKey)) {
-          // Find the typical page_index for this key from any entry
           for (const entry of entries) {
             const pv = entry.page_views?.find(p => p.page_key === pageKey);
             if (pv) {
@@ -313,8 +275,6 @@ export async function GET(request: NextRequest) {
     }
 
     // Auto-create FunnelStep records for API keys not in our 55 definitions
-    // Use sequential numbering starting at 1000 to avoid collisions
-    // (two page_keys can share the same page_index due to conditional branching)
     const existingStepKeys = new Set(FUNNEL_PAGES.map(p => p.pageKey));
     let autoStepNumber = 1000;
     for (const [pageKey] of pageKeyIndexMap) {
@@ -356,16 +316,14 @@ export async function GET(request: NextRequest) {
       }
     }
 
-    // Write step analytics PER DAY
-    // Delete all existing analytics for each date first to clear stale data
-    // (e.g., from previous syncs before embeddable_id filtering was added)
+    // Write step analytics PER DAY using batch operations
     const stepIds = steps.map(s => s.id);
     let stepsProcessed = 0;
 
     for (const [dateKey, dailySteps] of dailyStepData) {
       const analyticsDate = new Date(dateKey);
 
-      // Delete ALL existing step analytics for this date to prevent stale duplicates
+      // Delete ALL existing step analytics for this date
       await prisma.stepAnalytics.deleteMany({
         where: {
           stepId: { in: stepIds },
@@ -374,31 +332,44 @@ export async function GET(request: NextRequest) {
         },
       });
 
+      // Batch create all step analytics for this date
+      const stepRecords: Array<{
+        stepId: string;
+        date: Date;
+        entries: number;
+        exits: number;
+        conversions: number;
+        dropOffRate: number;
+        conversionRate: number;
+        avgTimeOnStep: number;
+      }> = [];
+
       for (const [pageKey, data] of dailySteps) {
         const stepId = stepKeyToId.get(pageKey);
-        if (!stepId) continue; // Skip if page_key doesn't match our definitions
+        if (!stepId) continue;
 
         const dropOffRate = data.views > 0 ? (data.exits / data.views) * 100 : 0;
         const conversionRate = data.views > 0 ? (data.continues / data.views) * 100 : 0;
 
-        await prisma.stepAnalytics.create({
-          data: {
-            stepId,
-            date: analyticsDate,
-            entries: data.views,
-            exits: data.exits,
-            conversions: data.continues,
-            dropOffRate,
-            conversionRate,
-            avgTimeOnStep: 0,
-          },
+        stepRecords.push({
+          stepId,
+          date: analyticsDate,
+          entries: data.views,
+          exits: data.exits,
+          conversions: data.continues,
+          dropOffRate,
+          conversionRate,
+          avgTimeOnStep: 0,
         });
-
         stepsProcessed++;
+      }
+
+      if (stepRecords.length > 0) {
+        await prisma.stepAnalytics.createMany({ data: stepRecords });
       }
     }
 
-    // Calculate and store funnel analytics PER DAY
+    // Write funnel analytics PER DAY
     const totalStarts = entries.length;
     const totalCompletions = entries.filter(e => hasCompletedPurchase(e.page_views)).length;
     const funnelConversionRate = totalStarts > 0 ? (totalCompletions / totalStarts) * 100 : 0;
@@ -409,7 +380,6 @@ export async function GET(request: NextRequest) {
         ? (dailyFunnel.completions / dailyFunnel.starts) * 100
         : 0;
 
-      // Delete existing funnel analytics for this date to clear stale data
       await prisma.funnelAnalytics.deleteMany({
         where: {
           funnelId: funnel.id,
@@ -451,10 +421,21 @@ export async function GET(request: NextRequest) {
       }
     }
 
-    // Find pages from our definition that had no data
     const pagesWithNoData = FUNNEL_PAGES
       .filter(p => !seenPageKeys.has(p.pageKey))
       .map(p => `${p.pageNumber}: ${p.pageKey}`);
+
+    // Purchase verification: show step counts for purchase-related keys
+    const purchaseKeys = ['payment_successful', 'asnyc_confirmation_to_redirect', 'calendar_page'];
+    const purchaseVerification: Record<string, number> = {};
+    for (const pk of purchaseKeys) {
+      let total = 0;
+      for (const [, dailySteps] of dailyStepData) {
+        const data = dailySteps.get(pk);
+        if (data) total += data.views;
+      }
+      purchaseVerification[pk] = total;
+    }
 
     console.log(`[Sync] Completed in ${duration}ms - Entries: ${entriesProcessed}, Steps: ${stepsProcessed}, Days: ${dailyFunnelData.size}`);
 
@@ -468,6 +449,7 @@ export async function GET(request: NextRequest) {
         totalCompletions,
         conversionRate: funnelConversionRate.toFixed(2),
       },
+      purchaseVerification,
       pageInfo: {
         totalPagesDefinition: FUNNEL_PAGES.length,
         pagesWithData: seenPageKeys.size,
