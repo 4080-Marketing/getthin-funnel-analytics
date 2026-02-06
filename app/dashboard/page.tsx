@@ -56,12 +56,14 @@ interface AlertSummary {
   warnings: number;
 }
 
-// Custom conversion supports single stepKey or multiple stepKeys (formula = sum)
+// Custom conversion supports single stepKey or multiple stepKeys
+// formula: 'sum' = add entries across keys, 'max' = take highest (avoids double-counting overlapping steps)
 interface CustomConversion {
   id: string;
   name: string;
   stepKey?: string;       // Single step (backward compat)
-  stepKeys?: string[];    // Multiple steps (formula: sum of entries)
+  stepKeys?: string[];    // Multiple steps
+  formula?: 'sum' | 'max'; // Default: 'sum' for backward compat; use 'max' for overlapping steps like purchases
   stepName: string;
 }
 
@@ -71,7 +73,7 @@ const DEFAULT_CUSTOM_CONVERSIONS: CustomConversion[] = [
   { id: '2', name: 'Quiz Started', stepKeys: ['current_height_and_weight'], stepName: 'Current Height and Weight' },
   { id: '3', name: 'Lead Capture', stepKeys: ['lead_capture'], stepName: 'Lead Capture' },
   { id: '4', name: 'Checkout Viewed', stepKeys: ['macro_checkout'], stepName: 'Macro Checkout' },
-  { id: '5', name: 'Purchase Complete', stepKeys: ['asnyc_confirmation_to_redirect', 'calendar_page'], stepName: 'Async Confirmation + Calendar Page' },
+  { id: '5', name: 'Purchase Complete', stepKeys: ['payment_successful', 'asnyc_confirmation_to_redirect', 'calendar_page'], formula: 'max', stepName: 'Payment Successful / Async Confirmation / Calendar Page' },
 ];
 
 // Default starred steps (key conversion points)
@@ -204,12 +206,17 @@ export default function DashboardPage() {
     const totalUsers = firstStep?.entries || 0;
 
     return customConversions.map((conv) => {
-      // Support both single stepKey and multiple stepKeys (formula = sum)
+      // Support both single stepKey and multiple stepKeys
+      // formula: 'sum' = add all, 'max' = take highest (for overlapping steps)
       const keys = conv.stepKeys || (conv.stepKey ? [conv.stepKey] : []);
-      const entries = keys.reduce((sum, key) => {
+      const formula = conv.formula || 'sum';
+      const entryCounts = keys.map(key => {
         const step = analytics.steps.find(s => s.stepKey === key);
-        return sum + (step?.entries || 0);
-      }, 0);
+        return step?.entries || 0;
+      });
+      const entries = formula === 'max'
+        ? Math.max(0, ...entryCounts)
+        : entryCounts.reduce((sum, c) => sum + c, 0);
       const percentage = totalUsers > 0 ? (entries / totalUsers) * 100 : 0;
 
       return {

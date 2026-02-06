@@ -119,29 +119,72 @@ export async function GET() {
     .filter(p => !apiKeysSet.has(p.pageKey))
     .map(p => ({ pageNumber: p.pageNumber, pageKey: p.pageKey, pageName: p.pageName }));
 
+  // Aggregate by page_key (not page_index) to reveal hidden keys
+  // that share indices with other keys due to conditional branching
+  const keyCountMap = new Map<string, number>();
+  for (const entry of entries) {
+    // Deduplicate per entry: count each page_key only once per entry
+    const seenKeys = new Set<string>();
+    for (const pv of (entry.page_views || [])) {
+      seenKeys.add(pv.page_key);
+    }
+    for (const k of seenKeys) {
+      keyCountMap.set(k, (keyCountMap.get(k) || 0) + 1);
+    }
+  }
+  const stepsByKey = Array.from(keyCountMap.entries())
+    .sort((a, b) => b[1] - a[1])
+    .map(([key, count]) => ({ key, uniqueEntries: count }));
+
   // Investigate payment_successful: find entries that reached the furthest steps
-  // and show their complete page_key lists
+  // and show their complete page_key lists with indices
   const purchaseInvestigation: {
     entriesReachingAsyncConfirm: number;
     entriesReachingCalendar: number;
+    entriesReachingPaymentSuccessful: number;
+    paymentSuccessfulIndices: number[];
+    asyncConfirmIndices: number[];
     allKeysContainingPayment: string[];
     sampleCompletedEntryKeys: string[][];
+    samplePaymentSuccessfulEntry: Array<{ page_key: string; page_index: number }> | null;
   } = {
     entriesReachingAsyncConfirm: 0,
     entriesReachingCalendar: 0,
+    entriesReachingPaymentSuccessful: 0,
+    paymentSuccessfulIndices: [],
+    asyncConfirmIndices: [],
     allKeysContainingPayment: [],
     sampleCompletedEntryKeys: [],
+    samplePaymentSuccessfulEntry: null,
   };
 
   const paymentKeySet = new Set<string>();
+  const paySuccessIndexSet = new Set<number>();
+  const asyncConfirmIndexSet = new Set<number>();
   for (const entry of entries) {
     const pvs = entry.page_views || [];
     const keys = pvs.map((pv: any) => pv.page_key);
 
     // Check for any key containing "pay" or "payment" or "success"
-    for (const k of keys) {
-      if (k && (k.includes('pay') || k.includes('purchase') || k.includes('success'))) {
-        paymentKeySet.add(k);
+    for (const pv of pvs) {
+      if (pv.page_key && (pv.page_key.includes('pay') || pv.page_key.includes('purchase') || pv.page_key.includes('success'))) {
+        paymentKeySet.add(pv.page_key);
+      }
+      if (pv.page_key === 'payment_successful') {
+        paySuccessIndexSet.add(pv.page_index);
+      }
+      if (pv.page_key === 'asnyc_confirmation_to_redirect') {
+        asyncConfirmIndexSet.add(pv.page_index);
+      }
+    }
+
+    if (keys.includes('payment_successful')) {
+      purchaseInvestigation.entriesReachingPaymentSuccessful++;
+      if (!purchaseInvestigation.samplePaymentSuccessfulEntry) {
+        purchaseInvestigation.samplePaymentSuccessfulEntry = pvs.map((pv: any) => ({
+          page_key: pv.page_key,
+          page_index: pv.page_index,
+        }));
       }
     }
 
@@ -156,6 +199,8 @@ export async function GET() {
     }
   }
   purchaseInvestigation.allKeysContainingPayment = Array.from(paymentKeySet);
+  purchaseInvestigation.paymentSuccessfulIndices = Array.from(paySuccessIndexSet).sort((a, b) => a - b);
+  purchaseInvestigation.asyncConfirmIndices = Array.from(asyncConfirmIndexSet).sort((a, b) => a - b);
 
   return NextResponse.json({
     totalEntriesBeforeFilter: totalBeforeFilter,
@@ -168,7 +213,8 @@ export async function GET() {
     lastStep,
     entriesReachingLastStep,
     suggestedCompletionStep: lastStepIndex,
-    steps,
+    stepsByIndex: steps,
+    stepsByKey,
     maxStepDistribution: stepDistribution,
     dataQuality: {
       duplicateKeys: duplicateKeys.length > 0 ? duplicateKeys : 'none',
