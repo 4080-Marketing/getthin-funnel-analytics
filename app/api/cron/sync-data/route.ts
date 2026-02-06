@@ -8,6 +8,7 @@
 import { NextRequest, NextResponse } from 'next/server';
 import prisma from '@/lib/db/prisma';
 import { startOfDay } from 'date-fns';
+import { FUNNEL_PAGES, isPurchaseComplete } from '@/lib/funnel-pages';
 
 export const runtime = 'nodejs';
 export const maxDuration = 300; // 5 minutes max execution
@@ -118,27 +119,48 @@ export async function GET(request: NextRequest) {
     }
 
     // Helper function to check if entry completed a purchase
+    // Uses the static page definitions from funnel-pages.ts
     const hasCompletedPurchase = (pageViews: EmbeddablesEntry['page_views']) => {
       if (!pageViews || pageViews.length === 0) return false;
-      // Check if any page_key indicates payment completion
-      return pageViews.some(pv =>
-        pv.page_key === 'payment_successful' ||
-        pv.page_key === 'async_confirmation_to_redirect' ||
-        pv.page_key.toLowerCase().includes('payment_successful') ||
-        pv.page_key.toLowerCase().includes('confirmation_to_redirect')
-      );
+      // Check if any page_key is a purchase completion page
+      // payment_successful (page 53) or asnyc_confirmation_to_redirect (page 54)
+      return pageViews.some(pv => isPurchaseComplete(pv.page_key));
     };
+
+    // Create all 55 page step definitions upfront
+    for (const pageDef of FUNNEL_PAGES) {
+      await prisma.funnelStep.upsert({
+        where: {
+          funnelId_stepNumber: {
+            funnelId: funnel.id,
+            stepNumber: pageDef.pageNumber,
+          },
+        },
+        create: {
+          funnelId: funnel.id,
+          stepNumber: pageDef.pageNumber,
+          stepName: pageDef.pageName,
+          stepKey: pageDef.pageKey,
+        },
+        update: {
+          stepName: pageDef.pageName,
+          stepKey: pageDef.pageKey,
+        },
+      });
+    }
+
+    // Update funnel total steps to 55
+    await prisma.funnel.update({
+      where: { id: funnel.id },
+      data: { totalSteps: FUNNEL_PAGES.length },
+    });
 
     // Process entries and store in database
     let entriesProcessed = 0;
 
-    // Track step data globally (for step definitions) and by date (for analytics)
-    const globalStepMap = new Map<number, { pageKey: string; pageName: string }>();
-
-    // Group analytics by date
-    const dailyStepData = new Map<string, Map<number, {
-      pageKey: string;
-      pageName: string;
+    // Group analytics by date, keyed by pageKey (not page_index)
+    // This maps page_key to analytics data per day
+    const dailyStepData = new Map<string, Map<string, {
       views: number;
       exits: number;
       continues: number;
@@ -199,23 +221,14 @@ export async function GET(request: NextRequest) {
         },
       });
 
-      // Process page views for step analytics
+      // Process page views for step analytics (keyed by page_key)
       for (let i = 0; i < pageViews.length; i++) {
         const pv = pageViews[i];
         const isLastStep = i === pageViews.length - 1;
         const isExit = isLastStep && !isCompleted;
 
-        const pageName = pv.page_key.replace(/_/g, ' ').replace(/\b\w/g, c => c.toUpperCase());
-
-        // Track globally for step definitions
-        if (!globalStepMap.has(pv.page_index)) {
-          globalStepMap.set(pv.page_index, { pageKey: pv.page_key, pageName });
-        }
-
-        // Track daily for analytics
-        const existing = dailySteps.get(pv.page_index) || {
-          pageKey: pv.page_key,
-          pageName,
+        // Track daily analytics by page_key
+        const existing = dailySteps.get(pv.page_key) || {
           views: 0,
           exits: 0,
           continues: 0,
@@ -228,41 +241,21 @@ export async function GET(request: NextRequest) {
           existing.continues++;
         }
 
-        dailySteps.set(pv.page_index, existing);
+        dailySteps.set(pv.page_key, existing);
       }
 
       entriesProcessed++;
     }
 
-    // Update funnel total steps
-    const maxStepFound = Math.max(...Array.from(globalStepMap.keys()), 0);
-    await prisma.funnel.update({
-      where: { id: funnel.id },
-      data: { totalSteps: maxStepFound + 1 },
+    // Build a map of stepKey -> stepId for quick lookup
+    const steps = await prisma.funnelStep.findMany({
+      where: { funnelId: funnel.id },
     });
-
-    // Create/update step definitions (global, not per day)
-    const stepIdMap = new Map<number, string>();
-    for (const [stepIndex, data] of globalStepMap) {
-      const step = await prisma.funnelStep.upsert({
-        where: {
-          funnelId_stepNumber: {
-            funnelId: funnel.id,
-            stepNumber: stepIndex,
-          },
-        },
-        create: {
-          funnelId: funnel.id,
-          stepNumber: stepIndex,
-          stepName: data.pageName,
-          stepKey: data.pageKey,
-        },
-        update: {
-          stepName: data.pageName,
-          stepKey: data.pageKey,
-        },
-      });
-      stepIdMap.set(stepIndex, step.id);
+    const stepKeyToId = new Map<string, string>();
+    for (const step of steps) {
+      if (step.stepKey) {
+        stepKeyToId.set(step.stepKey, step.id);
+      }
     }
 
     // Create/update step analytics PER DAY
@@ -270,9 +263,9 @@ export async function GET(request: NextRequest) {
     for (const [dateKey, dailySteps] of dailyStepData) {
       const analyticsDate = new Date(dateKey);
 
-      for (const [stepIndex, data] of dailySteps) {
-        const stepId = stepIdMap.get(stepIndex);
-        if (!stepId) continue;
+      for (const [pageKey, data] of dailySteps) {
+        const stepId = stepKeyToId.get(pageKey);
+        if (!stepId) continue; // Skip if page_key doesn't match our definitions
 
         const dropOffRate = data.views > 0 ? (data.exits / data.views) * 100 : 0;
         const conversionRate = data.views > 0 ? (data.continues / data.views) * 100 : 0;
@@ -371,15 +364,18 @@ export async function GET(request: NextRequest) {
       },
     });
 
-    // Check for missing page indexes (gaps)
-    const allIndexes = Array.from(globalStepMap.keys()).sort((a, b) => a - b);
-    const maxIndex = allIndexes.length > 0 ? allIndexes[allIndexes.length - 1] : 0;
-    const missingIndexes = [];
-    for (let i = 0; i <= maxIndex; i++) {
-      if (!globalStepMap.has(i)) {
-        missingIndexes.push(i);
+    // Collect all unique page keys seen in the data
+    const seenPageKeys = new Set<string>();
+    for (const [, dailySteps] of dailyStepData) {
+      for (const pageKey of dailySteps.keys()) {
+        seenPageKeys.add(pageKey);
       }
     }
+
+    // Find pages from our definition that had no data
+    const pagesWithNoData = FUNNEL_PAGES
+      .filter(p => !seenPageKeys.has(p.pageKey))
+      .map(p => `${p.pageNumber}: ${p.pageKey}`);
 
     console.log(`[Sync] Completed in ${duration}ms - Entries: ${entriesProcessed}, Steps: ${stepsProcessed}, Days: ${dailyFunnelData.size}`);
 
@@ -394,12 +390,9 @@ export async function GET(request: NextRequest) {
         conversionRate: funnelConversionRate.toFixed(2),
       },
       pageInfo: {
-        totalPagesFound: globalStepMap.size,
-        maxPageIndex: maxIndex,
-        missingIndexes: missingIndexes.length > 0 ? missingIndexes : 'none',
-        pageKeys: Array.from(globalStepMap.entries())
-          .sort((a, b) => a[0] - b[0])
-          .map(([idx, data]) => `${idx}: ${data.pageKey}`),
+        totalPagesDefinition: FUNNEL_PAGES.length,
+        pagesWithData: seenPageKeys.size,
+        pagesWithNoData: pagesWithNoData.length > 0 ? pagesWithNoData : 'all pages have data',
       },
       duration,
     });
