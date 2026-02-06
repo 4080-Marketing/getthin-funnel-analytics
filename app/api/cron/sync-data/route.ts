@@ -222,13 +222,23 @@ export async function GET(request: NextRequest) {
       });
 
       // Process page views for step analytics (keyed by page_key)
+      // Deduplicate by page_key: keep only the LAST occurrence of each key
+      // per entry. This handles conditional branching where the same page
+      // appears at multiple indices (e.g., social_proof at index 27 and 29).
+      // Using last occurrence ensures correct exit attribution.
+      const lastOccurrenceByKey = new Map<string, { arrayPosition: number; pageIndex: number }>();
       for (let i = 0; i < pageViews.length; i++) {
         const pv = pageViews[i];
-        const isLastStep = i === pageViews.length - 1;
+        lastOccurrenceByKey.set(pv.page_key, { arrayPosition: i, pageIndex: pv.page_index });
+      }
+
+      const lastArrayPosition = pageViews.length - 1;
+
+      for (const [pageKey, occurrence] of lastOccurrenceByKey) {
+        const isLastStep = occurrence.arrayPosition === lastArrayPosition;
         const isExit = isLastStep && !isCompleted;
 
-        // Track daily analytics by page_key
-        const existing = dailySteps.get(pv.page_key) || {
+        const existing = dailySteps.get(pageKey) || {
           views: 0,
           exits: 0,
           continues: 0,
@@ -241,7 +251,7 @@ export async function GET(request: NextRequest) {
           existing.continues++;
         }
 
-        dailySteps.set(pv.page_key, existing);
+        dailySteps.set(pageKey, existing);
       }
 
       entriesProcessed++;

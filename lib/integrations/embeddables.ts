@@ -115,12 +115,19 @@ class EmbeddablesClient {
       if (!entry.pageViews) continue;
 
       const sortedViews = [...entry.pageViews].sort((a, b) => a.index - b.index);
-      const lastViewIndex = Math.max(...sortedViews.map(v => v.index));
+      const lastArrayPosition = sortedViews.length - 1;
 
+      // Deduplicate by page_key per entry: keep only the LAST occurrence
+      // to handle conditional branching where the same page appears at
+      // multiple indices (e.g., social_proof at index 27 and 29).
+      const lastOccurrenceByKey = new Map<string, { view: typeof sortedViews[0]; arrayPosition: number }>();
       for (let i = 0; i < sortedViews.length; i++) {
         const view = sortedViews[i];
         const key = view.pageKey || `step_${view.index}`;
+        lastOccurrenceByKey.set(key, { view, arrayPosition: i });
+      }
 
+      for (const [key, { view, arrayPosition }] of lastOccurrenceByKey) {
         const existing = stepMap.get(key) || {
           stepKey: key,
           stepName: view.pageName || `Step ${view.index + 1}`,
@@ -135,13 +142,14 @@ class EmbeddablesClient {
         existing.views++;
 
         // Check if user exited at this step (it's their last step and they didn't complete)
-        if (view.index === lastViewIndex && !entry.completed) {
+        const isLastStep = arrayPosition === lastArrayPosition;
+        if (isLastStep && !entry.completed) {
           existing.exits++;
-        } else if (i < sortedViews.length - 1 || entry.completed) {
+        } else {
           existing.continues++;
         }
 
-        // Track time on step
+        // Track time on step (sum time across all occurrences for this key)
         if (view.timeSpent && view.timeSpent > 0) {
           existing.totalTime += view.timeSpent;
           existing.entriesWithTime++;
