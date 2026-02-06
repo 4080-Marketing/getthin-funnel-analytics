@@ -47,10 +47,14 @@ export async function GET(request: NextRequest) {
 
     const apiKey = process.env.EMBEDDABLES_API_KEY;
     const projectId = process.env.EMBEDDABLES_PROJECT_ID;
+    // Optional: filter to a specific embeddable (questionnaire) within the project
+    const embeddableIdFilter = process.env.EMBEDDABLES_EMBEDDABLE_ID;
 
     if (!apiKey || !projectId) {
       throw new Error('EMBEDDABLES_API_KEY or EMBEDDABLES_PROJECT_ID not configured');
     }
+
+    console.log(`[Sync] Filtering by embeddable_id: ${embeddableIdFilter || 'ALL (no filter set)'}`);
 
     // Fetch ALL entries from Embeddables API with pagination
     const entries: EmbeddablesEntry[] = [];
@@ -94,11 +98,21 @@ export async function GET(request: NextRequest) {
 
     console.log(`[Sync] Total entries fetched: ${entries.length}`);
 
-    if (entries.length === 0) {
+    // Filter by embeddable_id if specified
+    let filteredEntries = entries;
+    if (embeddableIdFilter) {
+      filteredEntries = entries.filter(e => e.embeddable_id === embeddableIdFilter);
+      console.log(`[Sync] After filtering by embeddable_id '${embeddableIdFilter}': ${filteredEntries.length} entries (was ${entries.length})`);
+    }
+
+    if (filteredEntries.length === 0) {
       return NextResponse.json({
         success: true,
-        message: 'No entries found in Embeddables',
+        message: embeddableIdFilter
+          ? `No entries found for embeddable_id '${embeddableIdFilter}'`
+          : 'No entries found in Embeddables',
         entriesProcessed: 0,
+        embeddableIdFilter: embeddableIdFilter || 'none',
       });
     }
 
@@ -171,7 +185,7 @@ export async function GET(request: NextRequest) {
       completions: number;
     }>();
 
-    for (const entry of entries) {
+    for (const entry of filteredEntries) {
       // Use entry's created_at date for analytics
       const entryDate = startOfDay(new Date(entry.created_at));
       const dateKey = entryDate.toISOString();
@@ -309,8 +323,8 @@ export async function GET(request: NextRequest) {
     }
 
     // Calculate and store funnel analytics PER DAY
-    const totalStarts = entries.length;
-    const totalCompletions = entries.filter(e => hasCompletedPurchase(e.page_views)).length;
+    const totalStarts = filteredEntries.length;
+    const totalCompletions = filteredEntries.filter(e => hasCompletedPurchase(e.page_views)).length;
     const funnelConversionRate = totalStarts > 0 ? (totalCompletions / totalStarts) * 100 : 0;
 
     for (const [dateKey, dailyFunnel] of dailyFunnelData) {
@@ -384,6 +398,11 @@ export async function GET(request: NextRequest) {
       entriesProcessed,
       stepsProcessed,
       daysProcessed: dailyFunnelData.size,
+      embeddableFilter: {
+        embeddableIdFilter: embeddableIdFilter || 'ALL',
+        totalEntriesFetched: entries.length,
+        entriesAfterFilter: filteredEntries.length,
+      },
       funnelMetrics: {
         totalStarts,
         totalCompletions,

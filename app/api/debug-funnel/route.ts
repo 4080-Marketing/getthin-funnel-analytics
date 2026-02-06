@@ -29,6 +29,17 @@ export async function GET() {
 
   const entries = await response.json();
 
+  // Analyze embeddable_ids first - this is critical for matching Embeddables analytics
+  const embeddableIdCounts = new Map<string, number>();
+  for (const entry of entries) {
+    const id = entry.embeddable_id || 'unknown';
+    embeddableIdCounts.set(id, (embeddableIdCounts.get(id) || 0) + 1);
+  }
+
+  const embeddableBreakdown = Array.from(embeddableIdCounts.entries())
+    .map(([id, count]) => ({ embeddable_id: id, count }))
+    .sort((a, b) => b.count - a.count);
+
   // Analyze the funnel structure
   const stepMap = new Map<number, { key: string; count: number }>();
   const maxStepsPerEntry: number[] = [];
@@ -86,6 +97,8 @@ export async function GET() {
 
   return NextResponse.json({
     totalEntries: entries.length,
+    embeddableBreakdown, // Shows all embeddable_ids and their counts
+    currentEmbeddableIdEnv: process.env.EMBEDDABLES_EMBEDDABLE_ID || 'NOT SET - counting all embeddables!',
     completedWithProductData: completedCount,
     totalSteps: steps.length,
     firstStep,
@@ -96,6 +109,7 @@ export async function GET() {
     maxStepDistribution: stepDistribution,
     sampleEntry: entries[0] ? {
       entry_id: entries[0].entry_id,
+      embeddable_id: entries[0].embeddable_id, // Include this to help identify
       page_views_count: entries[0].page_views?.length,
       has_entry_data: !!entries[0].entry_data,
       entry_data_preview: entries[0].entry_data?.substring(0, 500),

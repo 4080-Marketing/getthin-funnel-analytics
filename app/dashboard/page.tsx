@@ -134,12 +134,11 @@ export default function DashboardPage() {
     setError(null);
 
     try {
-      const daysDiff = Math.ceil(
-        (dateRange.endDate.getTime() - dateRange.startDate.getTime()) / (1000 * 60 * 60 * 24)
-      );
-      const days = Math.max(1, daysDiff);
+      // Pass actual start and end dates to API
+      const startDateStr = dateRange.startDate.toISOString();
+      const endDateStr = dateRange.endDate.toISOString();
 
-      const analyticsRes = await fetch(`/api/funnels/analytics?days=${days}`);
+      const analyticsRes = await fetch(`/api/funnels/analytics?startDate=${encodeURIComponent(startDateStr)}&endDate=${encodeURIComponent(endDateStr)}`);
       if (!analyticsRes.ok) {
         throw new Error('Failed to fetch analytics');
       }
