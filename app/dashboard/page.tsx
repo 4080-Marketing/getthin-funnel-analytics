@@ -454,6 +454,7 @@ export default function DashboardPage() {
               availableSteps={availableSteps}
               onToggleStarredStep={toggleStarredStep}
               onUpdateThresholds={setAlertThresholds}
+              onSyncComplete={fetchData}
             />
           </TabsContent>
         </Tabs>

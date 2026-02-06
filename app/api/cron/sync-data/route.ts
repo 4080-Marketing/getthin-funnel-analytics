@@ -34,11 +34,18 @@ export async function GET(request: NextRequest) {
   const startTime = Date.now();
 
   try {
-    // Verify cron secret
+    // Verify cron secret for external calls.
+    // Internal calls (from the browser via the dashboard Sync button) include
+    // a Referer/Origin header from the same site and don't need the secret.
     const authHeader = request.headers.get('authorization');
     const cronSecret = process.env.CRON_SECRET;
+    const referer = request.headers.get('referer') || '';
+    const origin = request.headers.get('origin') || '';
+    const appUrl = process.env.NEXT_PUBLIC_APP_URL || process.env.RAILWAY_PUBLIC_DOMAIN || '';
+    const isInternalCall = (referer && referer.includes('/dashboard')) ||
+                           (origin && appUrl && origin.includes(appUrl));
 
-    if (cronSecret && authHeader !== `Bearer ${cronSecret}`) {
+    if (cronSecret && !isInternalCall && authHeader !== `Bearer ${cronSecret}`) {
       return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
     }
 
