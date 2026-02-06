@@ -1,0 +1,310 @@
+"use client"
+
+import { useState } from "react"
+import { GripVertical, Pencil, Trash2, Plus, Star, Bell, Palette } from "lucide-react"
+import { Button } from "@/components/ui/button"
+import { Badge } from "@/components/ui/badge"
+import { cn } from "@/lib/utils"
+
+interface CustomConversion {
+  id: string
+  name: string
+  stepKey: string
+  stepName: string
+}
+
+interface SettingsPanelProps {
+  customConversions: CustomConversion[]
+  starredSteps: string[]
+  alertThresholds: {
+    dropOffWarning: number
+    dropOffCritical: number
+    volumeAlert: number
+    conversionAlert: number
+  }
+  availableSteps: Array<{ stepKey: string; stepName: string; stepNumber: number }>
+  onAddConversion?: () => void
+  onRemoveConversion?: (id: string) => void
+  onUpdateThresholds?: (thresholds: any) => void
+  onToggleStarredStep?: (stepKey: string) => void
+  className?: string
+}
+
+export function SettingsPanel({
+  customConversions,
+  starredSteps,
+  alertThresholds,
+  availableSteps,
+  onAddConversion,
+  onRemoveConversion,
+  onUpdateThresholds,
+  onToggleStarredStep,
+  className,
+}: SettingsPanelProps) {
+  const [editingThresholds, setEditingThresholds] = useState(false)
+  const [thresholds, setThresholds] = useState(alertThresholds)
+
+  return (
+    <div className={cn("space-y-8", className)}>
+      {/* Custom Conversions Section */}
+      <section className="rounded-lg border bg-white">
+        <div className="p-4 border-b bg-gray-50">
+          <div className="flex items-center gap-2">
+            <Star className="h-5 w-5 text-violet-600" />
+            <h3 className="font-semibold text-gray-900">Custom Conversions</h3>
+          </div>
+          <p className="text-sm text-gray-500 mt-1">
+            These metrics appear on your Overview dashboard
+          </p>
+        </div>
+
+        <div className="p-4 space-y-2">
+          {customConversions.length === 0 ? (
+            <p className="text-sm text-gray-500 text-center py-4">
+              No custom conversions configured
+            </p>
+          ) : (
+            customConversions.map((conv, index) => (
+              <div
+                key={conv.id}
+                className="flex items-center gap-3 p-3 rounded-lg border bg-gray-50 hover:bg-gray-100 transition-colors"
+              >
+                <GripVertical className="h-4 w-4 text-gray-400 cursor-grab" />
+                <div className="flex-1 min-w-0">
+                  <p className="font-medium text-gray-900 truncate">{conv.name}</p>
+                  <p className="text-sm text-gray-500 truncate">Step: {conv.stepName}</p>
+                </div>
+                <div className="flex items-center gap-1">
+                  <Button variant="ghost" size="icon" className="h-8 w-8">
+                    <Pencil className="h-3.5 w-3.5" />
+                  </Button>
+                  <Button
+                    variant="ghost"
+                    size="icon"
+                    className="h-8 w-8 text-red-500 hover:text-red-600 hover:bg-red-50"
+                    onClick={() => onRemoveConversion?.(conv.id)}
+                  >
+                    <Trash2 className="h-3.5 w-3.5" />
+                  </Button>
+                </div>
+              </div>
+            ))
+          )}
+
+          <Button
+            variant="outline"
+            className="w-full mt-4"
+            onClick={onAddConversion}
+          >
+            <Plus className="h-4 w-4 mr-2" />
+            Add Custom Conversion
+          </Button>
+        </div>
+      </section>
+
+      {/* Starred Steps Section */}
+      <section className="rounded-lg border bg-white">
+        <div className="p-4 border-b bg-gray-50">
+          <div className="flex items-center gap-2">
+            <Star className="h-5 w-5 text-amber-500" />
+            <h3 className="font-semibold text-gray-900">Starred Steps</h3>
+          </div>
+          <p className="text-sm text-gray-500 mt-1">
+            Filter the Funnel view to show only these steps
+          </p>
+        </div>
+
+        <div className="p-4">
+          <div className="flex flex-wrap gap-2">
+            {availableSteps.map((step) => {
+              const isStarred = starredSteps.includes(step.stepKey)
+              return (
+                <button
+                  key={step.stepKey}
+                  onClick={() => onToggleStarredStep?.(step.stepKey)}
+                  className={cn(
+                    "inline-flex items-center gap-1.5 px-3 py-1.5 rounded-full text-sm border transition-colors",
+                    isStarred
+                      ? "bg-amber-50 border-amber-200 text-amber-700"
+                      : "bg-gray-50 border-gray-200 text-gray-600 hover:bg-gray-100"
+                  )}
+                >
+                  <Star className={cn("h-3 w-3", isStarred && "fill-current")} />
+                  <span className="max-w-[150px] truncate">{step.stepName}</span>
+                </button>
+              )
+            })}
+          </div>
+          {starredSteps.length > 0 && (
+            <p className="text-sm text-gray-500 mt-4">
+              {starredSteps.length} steps starred
+            </p>
+          )}
+        </div>
+      </section>
+
+      {/* Alert Thresholds Section */}
+      <section className="rounded-lg border bg-white">
+        <div className="p-4 border-b bg-gray-50">
+          <div className="flex items-center justify-between">
+            <div className="flex items-center gap-2">
+              <Bell className="h-5 w-5 text-violet-600" />
+              <h3 className="font-semibold text-gray-900">Alert Thresholds</h3>
+            </div>
+            <Button
+              variant="outline"
+              size="sm"
+              onClick={() => setEditingThresholds(!editingThresholds)}
+            >
+              {editingThresholds ? "Cancel" : "Edit"}
+            </Button>
+          </div>
+          <p className="text-sm text-gray-500 mt-1">
+            Configure when alerts are triggered
+          </p>
+        </div>
+
+        <div className="p-4 space-y-4">
+          <div className="grid grid-cols-2 gap-4">
+            <div>
+              <label className="block text-sm font-medium text-gray-700 mb-1.5">
+                Drop-off Warning
+              </label>
+              <div className="flex items-center gap-2">
+                <input
+                  type="number"
+                  value={thresholds.dropOffWarning}
+                  onChange={(e) =>
+                    setThresholds({ ...thresholds, dropOffWarning: Number(e.target.value) })
+                  }
+                  disabled={!editingThresholds}
+                  className={cn(
+                    "w-20 px-3 py-2 text-sm border rounded-lg",
+                    editingThresholds ? "bg-white" : "bg-gray-50"
+                  )}
+                />
+                <span className="text-sm text-gray-500">%</span>
+                <Badge variant="warning" className="ml-auto">Warning</Badge>
+              </div>
+            </div>
+
+            <div>
+              <label className="block text-sm font-medium text-gray-700 mb-1.5">
+                Drop-off Critical
+              </label>
+              <div className="flex items-center gap-2">
+                <input
+                  type="number"
+                  value={thresholds.dropOffCritical}
+                  onChange={(e) =>
+                    setThresholds({ ...thresholds, dropOffCritical: Number(e.target.value) })
+                  }
+                  disabled={!editingThresholds}
+                  className={cn(
+                    "w-20 px-3 py-2 text-sm border rounded-lg",
+                    editingThresholds ? "bg-white" : "bg-gray-50"
+                  )}
+                />
+                <span className="text-sm text-gray-500">%</span>
+                <Badge variant="critical" className="ml-auto">Critical</Badge>
+              </div>
+            </div>
+
+            <div>
+              <label className="block text-sm font-medium text-gray-700 mb-1.5">
+                Volume Alert (below)
+              </label>
+              <div className="flex items-center gap-2">
+                <input
+                  type="number"
+                  value={thresholds.volumeAlert}
+                  onChange={(e) =>
+                    setThresholds({ ...thresholds, volumeAlert: Number(e.target.value) })
+                  }
+                  disabled={!editingThresholds}
+                  className={cn(
+                    "w-20 px-3 py-2 text-sm border rounded-lg",
+                    editingThresholds ? "bg-white" : "bg-gray-50"
+                  )}
+                />
+                <span className="text-sm text-gray-500">daily starts</span>
+              </div>
+            </div>
+
+            <div>
+              <label className="block text-sm font-medium text-gray-700 mb-1.5">
+                Conversion Alert (below)
+              </label>
+              <div className="flex items-center gap-2">
+                <input
+                  type="number"
+                  value={thresholds.conversionAlert}
+                  onChange={(e) =>
+                    setThresholds({ ...thresholds, conversionAlert: Number(e.target.value) })
+                  }
+                  disabled={!editingThresholds}
+                  className={cn(
+                    "w-20 px-3 py-2 text-sm border rounded-lg",
+                    editingThresholds ? "bg-white" : "bg-gray-50"
+                  )}
+                />
+                <span className="text-sm text-gray-500">% completion</span>
+              </div>
+            </div>
+          </div>
+
+          {editingThresholds && (
+            <div className="flex justify-end pt-2">
+              <Button
+                onClick={() => {
+                  onUpdateThresholds?.(thresholds)
+                  setEditingThresholds(false)
+                }}
+                className="bg-violet-600 hover:bg-violet-700"
+              >
+                Save Changes
+              </Button>
+            </div>
+          )}
+        </div>
+      </section>
+
+      {/* Display Preferences Section */}
+      <section className="rounded-lg border bg-white">
+        <div className="p-4 border-b bg-gray-50">
+          <div className="flex items-center gap-2">
+            <Palette className="h-5 w-5 text-violet-600" />
+            <h3 className="font-semibold text-gray-900">Display Preferences</h3>
+          </div>
+        </div>
+
+        <div className="p-4 space-y-4">
+          <div className="flex items-center justify-between">
+            <div>
+              <p className="font-medium text-gray-900">Auto-refresh interval</p>
+              <p className="text-sm text-gray-500">How often to update data</p>
+            </div>
+            <select className="px-3 py-2 border rounded-lg text-sm bg-white">
+              <option value="1">1 minute</option>
+              <option value="5" selected>5 minutes</option>
+              <option value="15">15 minutes</option>
+              <option value="30">30 minutes</option>
+            </select>
+          </div>
+
+          <div className="flex items-center justify-between">
+            <div>
+              <p className="font-medium text-gray-900">Default tab</p>
+              <p className="text-sm text-gray-500">Which tab to show on load</p>
+            </div>
+            <select className="px-3 py-2 border rounded-lg text-sm bg-white">
+              <option value="overview">Overview</option>
+              <option value="funnel">Funnel</option>
+              <option value="alerts">Alerts</option>
+            </select>
+          </div>
+        </div>
+      </section>
+    </div>
+  )
+}
