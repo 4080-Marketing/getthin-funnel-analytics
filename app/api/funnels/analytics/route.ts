@@ -91,6 +91,21 @@ export async function GET(request: NextRequest) {
       avgConversionRate: number;
     }>();
 
+    // Initialize ALL steps with zero values first
+    for (const step of funnel.steps) {
+      stepMetrics.set(step.id, {
+        stepNumber: step.stepNumber,
+        stepName: step.stepName,
+        stepKey: step.stepKey,
+        entries: 0,
+        exits: 0,
+        conversions: 0,
+        avgDropOffRate: 0,
+        avgConversionRate: 0,
+      });
+    }
+
+    // Then add actual analytics data
     for (const sa of stepAnalytics) {
       const key = sa.step.id;
       const existing = stepMetrics.get(key);
@@ -98,17 +113,13 @@ export async function GET(request: NextRequest) {
         existing.entries += sa.entries;
         existing.exits += sa.exits;
         existing.conversions += sa.conversions;
-      } else {
-        stepMetrics.set(key, {
-          stepNumber: sa.step.stepNumber,
-          stepName: sa.step.stepName,
-          stepKey: sa.step.stepKey,
-          entries: sa.entries,
-          exits: sa.exits,
-          conversions: sa.conversions,
-          avgDropOffRate: sa.dropOffRate,
-          avgConversionRate: sa.conversionRate,
-        });
+        // Recalculate rates based on totals
+        existing.avgDropOffRate = existing.entries > 0
+          ? (existing.exits / existing.entries) * 100
+          : 0;
+        existing.avgConversionRate = existing.entries > 0
+          ? (existing.conversions / existing.entries) * 100
+          : 0;
       }
     }
 
@@ -131,6 +142,12 @@ export async function GET(request: NextRequest) {
 
     return NextResponse.json({
       success: true,
+      totalEntries: totalStarts, // For dashboard "no data" check
+      dateRange: {
+        start: format(startDate, 'yyyy-MM-dd'),
+        end: format(endDate, 'yyyy-MM-dd'),
+        days,
+      },
       funnel: {
         id: funnel.id,
         name: funnel.name,
